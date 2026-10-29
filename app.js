@@ -1,9 +1,9 @@
 'use strict';
 
-const ENTRIES_KEY = 'schulden.entries.v1';
-const SETTINGS_KEY = 'schulden.settings.v1';
+const CACHE_KEY = 'schulden.cache.v2'; // letzter Stand vom Server, für den Offline-Fall
+const LEGACY_KEY = 'schulden.entries.v1'; // Einträge aus der ersten Version ohne Server
+const LEGACY_DECLINED_KEY = 'schulden.legacyDeclined';
 const HINT_KEY = 'schulden.installHintDismissed';
-const DEFAULT_NAME = 'Papa';
 const MAX_CENTS = 100_000_000_00; // 100 Mio. €
 
 const euro = new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' });
@@ -13,7 +13,14 @@ const monthFmt = new Intl.DateTimeFormat('de-DE', { month: 'long', year: 'numeri
 
 const $ = (sel) => document.querySelector(sel);
 
-// ---------- Speicher ----------
+// ---------- Zustand ----------
+
+let me = null; // { username, name, role: 'borrower' | 'lender' }
+let partner = null; // { username, name, role }
+let entries = [];
+let storage = null; // { type, location }
+
+// ---------- Browser-Speicher (nur Cache und Hinweise) ----------
 
 function loadJSON(key, fallback) {
   try {
@@ -27,53 +34,136 @@ function loadJSON(key, fallback) {
 function saveJSON(key, value) {
   try {
     localStorage.setItem(key, JSON.stringify(value));
-    return true;
   } catch {
-    alert('Speichern hat nicht geklappt. Ist der Speicher voll oder der private Modus aktiv?');
-    return false;
+    // Kein Speicher verfügbar (z. B. privater Modus) – die App funktioniert trotzdem.
   }
 }
 
-function isValidEntry(e) {
-  return (
-    e !== null &&
-    typeof e === 'object' &&
-    (e.dir === 'borrow' || e.dir === 'repay') &&
-    Number.isInteger(e.cents) &&
-    e.cents > 0 &&
-    e.cents <= MAX_CENTS &&
-    typeof e.date === 'string' &&
-    /^\d{4}-\d{2}-\d{2}$/.test(e.date)
-  );
+function removeKey(key) {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // egal
+  }
 }
 
-function normalizeEntry(e) {
-  return {
-    id: typeof e.id === 'string' && e.id ? e.id : newId(),
-    dir: e.dir,
-    cents: e.cents,
-    date: e.date,
-    note: typeof e.note === 'string' ? e.note.slice(0, 120) : '',
-    createdAt: Number.isFinite(e.createdAt) ? e.createdAt : 0,
-  };
+// ---------- Server ----------
+
+class ApiError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.status = status;
+  }
 }
 
-function loadEntries() {
-  const list = loadJSON(ENTRIES_KEY, []);
-  return Array.isArray(list) ? list.filter(isValidEntry).map(normalizeEntry) : [];
+async function api(action, body) {
+  const init =
+    body === undefined
+      ? { cache: 'no-store' }
+      : {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'schulden' },
+          body: JSON.stringify(body),
+        };
+  let response;
+  try {
+    response = await fetch(`api/index.php?a=${action}`, { credentials: 'same-origin', ...init });
+  } catch {
+    throw new ApiError('Keine Verbindung zum Server. Bist du online?', 0);
+  }
+  let data = null;
+  try {
+    data = await response.json();
+  } catch {
+    // keine JSON-Antwort
+  }
+  if (response.ok && data) return data;
+  if (data?.error) throw new ApiError(data.error, response.status);
+  if (response.status === 404) {
+    throw new ApiError('Der Server-Teil der App (api/index.php) wurde nicht gefunden.', 404);
+  }
+  throw new ApiError(`Der Server antwortet nicht wie erwartet (Status ${response.status}). Läuft dort PHP?`, response.status);
 }
 
-function loadSettings() {
-  const stored = loadJSON(SETTINGS_KEY, {});
-  const name = typeof stored?.name === 'string' && stored.name.trim() ? stored.name.trim() : DEFAULT_NAME;
-  return { name };
+/** Aktion ausführen, die den neuen Stand zurückliefert. */
+async function send(action, body) {
+  try {
+    const data = await api(action, body);
+    setOffline(false);
+    if (data.user) applyState(data);
+    return data;
+  } catch (err) {
+    if (err.status === 401 && me) sessionExpired();
+    if (err.status === 0 && me) setOffline(true);
+    throw err;
+  }
 }
 
-let entries = loadEntries();
-let settings = loadSettings();
+function applyState(data, { fromCache = false } = {}) {
+  me = data.user;
+  partner = data.partner || null;
+  entries = Array.isArray(data.entries) ? data.entries : [];
+  storage = data.storage || null;
+  if (!fromCache) saveJSON(CACHE_KEY, { user: me, partner, entries, storage });
+  render();
+}
 
-const persistEntries = () => saveJSON(ENTRIES_KEY, entries);
-const persistSettings = () => saveJSON(SETTINGS_KEY, settings);
+function clearSession() {
+  me = null;
+  partner = null;
+  entries = [];
+  storage = null;
+  removeKey(CACHE_KEY);
+}
+
+function sessionExpired() {
+  clearSession();
+  document.querySelectorAll('dialog[open]').forEach((dialog) => dialog.close());
+  showScreen('login');
+  setFormError($('#login-form'), 'Du wurdest abgemeldet. Bitte melde dich erneut an.');
+}
+
+function setOffline(offline) {
+  $('#offline-banner').hidden = !offline;
+}
+
+let loading = null;
+
+/** Stand vom Server holen und passenden Bildschirm zeigen. */
+function load() {
+  loading ??= (async () => {
+    let data;
+    try {
+      data = await api('state');
+    } catch (err) {
+      if (me) {
+        setOffline(err.status === 0);
+      } else {
+        $('#auth-failed-text').textContent = err.message;
+        showScreen('failed');
+      }
+      return;
+    }
+    setOffline(false);
+    if (data.needsSetup) {
+      clearSession();
+      document.querySelectorAll('dialog[open]').forEach((dialog) => dialog.close());
+      showScreen('setup');
+      return;
+    }
+    if (!data.user) {
+      if (me) sessionExpired();
+      else showScreen('login');
+      return;
+    }
+    applyState(data);
+    showScreen('app');
+    offerLegacyUpload();
+  })().finally(() => {
+    loading = null;
+  });
+  return loading;
+}
 
 // ---------- Hilfsfunktionen ----------
 
@@ -85,6 +175,7 @@ function newId() {
 const signed = (e) => (e.dir === 'borrow' ? e.cents : -e.cents);
 const formatEuro = (cents) => euro.format(cents / 100);
 const centsToInput = (cents) => (cents / 100).toFixed(2).replace('.', ',');
+const partnerName = () => partner?.name || 'der anderen Person';
 
 function todayISO(offsetDays = 0) {
   const d = new Date();
@@ -137,11 +228,59 @@ function h(tag, props = {}, ...children) {
   return el;
 }
 
+/**
+ * Beschriftungen aus Sicht der angemeldeten Person. Intern zählt jeder Betrag aus Sicht
+ * der Person mit den Schulden: "borrow" erhöht die Schulden, "repay" verringert sie.
+ */
+function words() {
+  const p = partnerName();
+  if (me?.role === 'lender') {
+    return {
+      borrow: 'Verliehen',
+      borrowTitle: 'Verliehen',
+      borrowSub: `an ${p} gegeben`,
+      repay: 'Zurückbekommen',
+      repayTitle: 'Zurück\u00ADbekommen', // weiches Trennzeichen für schmale Bildschirme
+      repaySub: `von ${p} bekommen`,
+      borrowHint: `Du hast ${p} Geld gegeben oder etwas für ${p} bezahlt.`,
+      repayHint: `${p} hat dir Geld zurückgegeben oder etwas für dich bezahlt.`,
+      emptyHint: `Tippe auf „Verliehen“, wenn du ${p} Geld gibst oder etwas für ${p} bezahlst.`,
+      positive: `${p} schuldet dir`,
+      negative: `Du schuldest ${p}`,
+    };
+  }
+  return {
+    borrow: 'Geliehen',
+    borrowTitle: 'Geliehen',
+    borrowSub: `von ${p} bekommen`,
+    repay: 'Zurückgezahlt',
+    repayTitle: 'Zurück\u00ADgezahlt',
+    repaySub: `an ${p} gegeben`,
+    borrowHint: `${p} hat dir Geld gegeben oder etwas für dich bezahlt.`,
+    repayHint: `Du hast ${p} Geld zurückgegeben oder etwas für ${p} bezahlt.`,
+    emptyHint: `Tippe auf „Geliehen“, wenn dir ${p} Geld gibt oder etwas für dich bezahlt.`,
+    positive: `Du schuldest ${p}`,
+    negative: `${p} schuldet dir`,
+  };
+}
+
 // ---------- Darstellung ----------
 
+function showScreen(name) {
+  $('#app').hidden = name !== 'app';
+  $('#auth').hidden = name === 'app';
+  $('#auth-status').hidden = name !== 'loading';
+  $('#login-form').hidden = name !== 'login';
+  $('#setup-form').hidden = name !== 'setup';
+  $('#auth-failed').hidden = name !== 'failed';
+  if (name === 'app') updateInstallUI();
+}
+
 function render() {
-  const { name } = settings;
-  document.querySelectorAll('[data-name]').forEach((el) => (el.textContent = name));
+  if (!me) return;
+  const w = words();
+  document.querySelectorAll('[data-partner]').forEach((el) => (el.textContent = partnerName()));
+  document.querySelectorAll('[data-word]').forEach((el) => (el.textContent = w[el.dataset.word]));
 
   let borrowed = 0;
   let repaid = 0;
@@ -151,18 +290,16 @@ function render() {
   }
   const balance = borrowed - repaid;
 
-  $('#balance-label').textContent =
-    balance > 0 ? `Du schuldest ${name}` : balance < 0 ? `${name} schuldet dir` : 'Ihr seid quitt';
+  $('#balance-label').textContent = balance > 0 ? w.positive : balance < 0 ? w.negative : 'Ihr seid quitt';
   $('#balance-amount').textContent = formatEuro(Math.abs(balance));
   $('#balance-totals').textContent = entries.length
-    ? `Geliehen ${formatEuro(borrowed)} · Zurückgezahlt ${formatEuro(repaid)}`
+    ? `${w.borrow} ${formatEuro(borrowed)} · ${w.repay} ${formatEuro(repaid)}`
     : '';
 
-  renderHistory();
+  renderHistory(w);
 }
 
-function renderHistory() {
-  const history = $('#history');
+function renderHistory(w) {
   const rows = withRunningBalance().reverse();
   $('#empty').hidden = rows.length > 0;
 
@@ -181,17 +318,18 @@ function renderHistory() {
         'section',
         { class: 'month' },
         h('h3', { class: 'month-head' }, monthFmt.format(new Date(y, m - 1, 1))),
-        h('ul', { class: 'entries card' }, ...list.map(renderEntry))
+        h('ul', { class: 'entries card' }, ...list.map((e) => renderEntry(e, w)))
       )
     );
   }
-  history.replaceChildren(...sections);
+  $('#history').replaceChildren(...sections);
 }
 
-function renderEntry(e) {
-  const dirLabel = e.dir === 'borrow' ? 'Geliehen' : 'Zurückgezahlt';
+function renderEntry(e, w) {
+  const dirLabel = e.dir === 'borrow' ? w.borrow : w.repay;
   const sign = e.dir === 'borrow' ? '+' : '−';
-  const running = e.running < 0 ? `${settings.name} schuldet dir ${formatEuro(-e.running)}` : `Stand ${formatEuro(e.running)}`;
+  const running = e.running < 0 ? `${w.negative} ${formatEuro(-e.running)}` : `Stand ${formatEuro(e.running)}`;
+  const author = e.createdBy || '?';
 
   return h(
     'li',
@@ -199,7 +337,7 @@ function renderEntry(e) {
     h(
       'button',
       { class: `entry ${e.dir}`, type: 'button', dataset: { id: e.id } },
-      h('span', { class: 'entry-dot', 'aria-hidden': 'true' }),
+      h('span', { class: 'entry-avatar', title: `Eingetragen von ${author}` }, Array.from(author)[0].toUpperCase()),
       h(
         'span',
         { class: 'entry-main' },
@@ -214,6 +352,25 @@ function renderEntry(e) {
       )
     )
   );
+}
+
+// ---------- Formulare ----------
+
+function setFormError(form, message) {
+  const el = form.querySelector('[data-error]');
+  el.textContent = message || '';
+  el.hidden = !message;
+}
+
+/** Sperrt die Buttons eines Formulars, solange die Anfrage läuft. */
+async function whileBusy(form, task) {
+  const buttons = form.querySelectorAll('button');
+  buttons.forEach((b) => (b.disabled = true));
+  try {
+    return await task();
+  } finally {
+    buttons.forEach((b) => (b.disabled = false));
+  }
 }
 
 // ---------- Toast ----------
@@ -240,15 +397,123 @@ function hideToast() {
   $('#toast').hidden = true;
 }
 
+function undoToast(text, ids) {
+  showToast(text, {
+    action: 'Rückgängig',
+    duration: 8000,
+    onAction: () => send('restore', { ids }).catch((err) => alert(err.message)),
+  });
+}
+
+// ---------- Anmelden und Einrichten ----------
+
+const loginForm = $('#login-form');
+const setupForm = $('#setup-form');
+
+loginForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const f = loginForm.elements;
+  setFormError(loginForm, '');
+  try {
+    await whileBusy(loginForm, () => send('login', { username: f.username.value, password: f.password.value }));
+  } catch (err) {
+    setFormError(loginForm, err.message);
+    return;
+  }
+  loginForm.reset();
+  showScreen('app');
+  offerLegacyUpload();
+});
+
+setupForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const f = setupForm.elements;
+  setFormError(setupForm, '');
+  try {
+    await whileBusy(setupForm, () =>
+      send('setup', {
+        role: f.role.value,
+        me: { name: f.me_name.value, username: f.me_username.value, password: f.me_password.value },
+        partner: { name: f.partner_name.value, username: f.partner_username.value, password: f.partner_password.value },
+      })
+    );
+  } catch (err) {
+    setFormError(setupForm, err.message);
+    return;
+  }
+  setupForm.reset();
+  showScreen('app');
+  offerLegacyUpload();
+});
+
+// Benutzernamen aus dem Namen vorschlagen, solange man ihn nicht selbst ändert.
+function suggestUsername(name) {
+  return name
+    .toLowerCase()
+    .replace(/ä/g, 'ae')
+    .replace(/ö/g, 'oe')
+    .replace(/ü/g, 'ue')
+    .replace(/ß/g, 'ss')
+    .replace(/\s+/g, '.')
+    .replace(/[^a-z0-9._-]/g, '')
+    .slice(0, 30);
+}
+
+for (const prefix of ['me', 'partner']) {
+  const nameInput = setupForm.elements[`${prefix}_name`];
+  const userInput = setupForm.elements[`${prefix}_username`];
+  userInput.addEventListener('input', () => (userInput.dataset.touched = userInput.value ? '1' : ''));
+  nameInput.addEventListener('input', () => {
+    if (!userInput.dataset.touched) userInput.value = suggestUsername(nameInput.value);
+  });
+}
+
+$('#auth-retry').addEventListener('click', () => {
+  showScreen('loading');
+  load();
+});
+
+/** Einträge aus der ersten Version (nur im Browser gespeichert) einmalig hochladen. */
+let legacyOffered = false;
+
+async function offerLegacyUpload() {
+  if (legacyOffered) return;
+  legacyOffered = true;
+  const legacy = loadJSON(LEGACY_KEY, null);
+  if (!Array.isArray(legacy) || legacy.length === 0 || loadJSON(LEGACY_DECLINED_KEY, false)) return;
+
+  const count = legacy.length === 1 ? 'ist noch 1 Eintrag' : `sind noch ${legacy.length} Einträge`;
+  const ok = confirm(
+    `Auf diesem Gerät ${count} aus der Version ohne Login gespeichert.\n\n` +
+      `Jetzt auf den Server hochladen, damit ${partnerName()} ${legacy.length === 1 ? 'ihn' : 'sie'} auch sieht?`
+  );
+  if (!ok) {
+    saveJSON(LEGACY_DECLINED_KEY, true);
+    return;
+  }
+  try {
+    const data = await send('import', { entries: legacy });
+    removeKey(LEGACY_KEY);
+    showToast(`${data.added + data.restored} Einträge hochgeladen`);
+  } catch (err) {
+    legacyOffered = false;
+    alert(`Hochladen hat nicht geklappt: ${err.message}`);
+  }
+}
+
 // ---------- Eintrag hinzufügen / bearbeiten ----------
 
 const entrySheet = $('#entry-sheet');
 const entryForm = $('#entry-form');
 const amountInput = $('#amount');
-let editingId = null;
+let currentId = null;
+let isNewEntry = true;
 
 function openEntrySheet(dir, entry = null) {
-  editingId = entry ? entry.id : null;
+  // Neue Einträge bekommen ihre ID schon jetzt, damit ein erneutes Senden nach
+  // einem Verbindungsfehler nichts doppelt anlegt.
+  currentId = entry ? entry.id : newId();
+  isNewEntry = !entry;
   entryForm.reset();
   entryForm.elements.dir.value = entry ? entry.dir : dir;
   amountInput.value = entry ? centsToInput(entry.cents) : '';
@@ -256,7 +521,17 @@ function openEntrySheet(dir, entry = null) {
   $('#date').value = entry ? entry.date : todayISO();
   $('#entry-title').textContent = entry ? 'Eintrag bearbeiten' : 'Neuer Eintrag';
   $('#delete-entry').hidden = !entry;
+
+  const info = $('#entry-info');
+  info.hidden = !entry;
+  if (entry) {
+    const created = entry.createdAt > 0 ? ` am ${dayYearFmt.format(new Date(entry.createdAt))}` : '';
+    const updated = entry.updatedBy ? ` · zuletzt geändert von ${entry.updatedBy}` : '';
+    info.textContent = `Eingetragen von ${entry.createdBy || 'unbekannt'}${created}${updated}`;
+  }
+
   setAmountError(false);
+  setFormError(entryForm, '');
   updateDirHint();
   hideToast();
   entrySheet.showModal();
@@ -264,11 +539,8 @@ function openEntrySheet(dir, entry = null) {
 }
 
 function updateDirHint() {
-  const { name } = settings;
-  $('#dir-hint').textContent =
-    entryForm.elements.dir.value === 'borrow'
-      ? `${name} hat dir Geld gegeben oder etwas für dich bezahlt.`
-      : `Du hast ${name} Geld zurückgegeben oder etwas für ${name} bezahlt.`;
+  const w = words();
+  $('#dir-hint').textContent = entryForm.elements.dir.value === 'borrow' ? w.borrowHint : w.repayHint;
 }
 
 function setAmountError(show) {
@@ -282,7 +554,7 @@ entryForm.addEventListener('change', (event) => {
 
 amountInput.addEventListener('input', () => setAmountError(false));
 
-entryForm.addEventListener('submit', (event) => {
+entryForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   const cents = parseCents(amountInput.value);
   if (!(cents > 0 && cents <= MAX_CENTS)) {
@@ -291,41 +563,36 @@ entryForm.addEventListener('submit', (event) => {
     return;
   }
   const dateValue = $('#date').value;
-  const data = {
+  const entry = {
+    id: currentId,
     dir: entryForm.elements.dir.value,
     cents,
     note: $('#note').value.trim(),
     date: /^\d{4}-\d{2}-\d{2}$/.test(dateValue) ? dateValue : todayISO(),
   };
 
-  const wasEditing = Boolean(editingId);
-  if (wasEditing) {
-    entries = entries.map((e) => (e.id === editingId ? { ...e, ...data } : e));
-  } else {
-    entries.push({ id: newId(), createdAt: Date.now(), ...data });
+  setFormError(entryForm, '');
+  try {
+    await whileBusy(entryForm, () => send('save', entry));
+  } catch (err) {
+    if (err.status !== 401) setFormError(entryForm, err.message);
+    return;
   }
-  persistEntries();
-  render();
   entrySheet.close();
-  showToast(wasEditing ? 'Änderung gespeichert' : 'Eintrag gespeichert');
+  showToast(isNewEntry ? 'Eintrag gespeichert' : 'Änderung gespeichert');
 });
 
-$('#delete-entry').addEventListener('click', () => {
-  const removed = entries.find((e) => e.id === editingId);
-  if (!removed) return;
-  entries = entries.filter((e) => e !== removed);
-  persistEntries();
-  render();
+$('#delete-entry').addEventListener('click', async () => {
+  const id = currentId;
+  setFormError(entryForm, '');
+  try {
+    await whileBusy(entryForm, () => send('delete', { id }));
+  } catch (err) {
+    if (err.status !== 401) setFormError(entryForm, err.message);
+    return;
+  }
   entrySheet.close();
-  showToast('Eintrag gelöscht', {
-    action: 'Rückgängig',
-    duration: 6000,
-    onAction: () => {
-      entries.push(removed);
-      persistEntries();
-      render();
-    },
-  });
+  undoToast('Eintrag gelöscht', [id]);
 });
 
 document.querySelectorAll('[data-add]').forEach((button) => {
@@ -351,19 +618,62 @@ document.querySelectorAll('dialog').forEach((dialog) => {
 // ---------- Einstellungen ----------
 
 const settingsSheet = $('#settings-sheet');
-const nameInput = $('#person-name');
+const passwordForm = $('#password-form');
+const partnerPasswordForm = $('#partner-password-form');
 
 $('#open-settings').addEventListener('click', () => {
-  nameInput.value = settings.name;
+  $('#me-name').textContent = me.name;
+  $('#me-username').textContent = me.username;
+  $('#storage-text').textContent = storage
+    ? `Eure Einträge liegen auf eurem Server (${storage.type}: ${storage.location}). ` +
+      `${me.name} und ${partnerName()} sehen dieselben Daten. Ein Backup als Datei schadet trotzdem nicht.`
+    : '';
+  for (const form of [passwordForm, partnerPasswordForm]) {
+    form.reset();
+    setFormError(form, '');
+    form.closest('details').open = false;
+  }
   updateInstallUI();
   hideToast();
   settingsSheet.showModal();
 });
 
-nameInput.addEventListener('input', () => {
-  settings.name = nameInput.value.trim() || DEFAULT_NAME;
-  persistSettings();
-  render();
+$('#logout').addEventListener('click', async () => {
+  await api('logout', {}).catch(() => {});
+  clearSession();
+  settingsSheet.close();
+  showScreen('login');
+  setFormError(loginForm, '');
+});
+
+passwordForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const f = passwordForm.elements;
+  setFormError(passwordForm, '');
+  try {
+    await whileBusy(passwordForm, () => send('password', { current: f.current.value, new: f.new.value }));
+  } catch (err) {
+    if (err.status !== 401) setFormError(passwordForm, err.message);
+    return;
+  }
+  settingsSheet.close();
+  showToast('Passwort geändert');
+});
+
+partnerPasswordForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const f = partnerPasswordForm.elements;
+  setFormError(partnerPasswordForm, '');
+  try {
+    await whileBusy(partnerPasswordForm, () =>
+      send('partner-password', { current: f.current.value, new: f.new.value })
+    );
+  } catch (err) {
+    if (err.status !== 401) setFormError(partnerPasswordForm, err.message);
+    return;
+  }
+  settingsSheet.close();
+  showToast(`Neues Passwort für ${partnerName()} gesetzt`);
 });
 
 function backupFilename(ext) {
@@ -392,17 +702,31 @@ async function shareOrDownload(filename, content, type) {
 }
 
 $('#export-json').addEventListener('click', () => {
-  const backup = { app: 'schulden', version: 1, exportedAt: new Date().toISOString(), settings, entries };
+  const backup = {
+    app: 'schulden',
+    version: 2,
+    exportedAt: new Date().toISOString(),
+    users: [me, partner].filter(Boolean),
+    entries,
+  };
   shareOrDownload(backupFilename('json'), JSON.stringify(backup, null, 2), 'application/json');
 });
 
 $('#export-csv').addEventListener('click', () => {
+  const w = words();
   const num = (cents) => (cents / 100).toFixed(2).replace('.', ',');
   const cell = (value) => (/[";\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value);
-  const rows = [['Datum', 'Art', 'Betrag (€)', 'Notiz', 'Stand (€)']];
+  const rows = [['Datum', 'Art', 'Betrag (€)', 'Notiz', 'Stand (€)', 'Eingetragen von']];
   for (const e of withRunningBalance()) {
     const [y, m, d] = e.date.split('-');
-    rows.push([`${d}.${m}.${y}`, e.dir === 'borrow' ? 'Geliehen' : 'Zurückgezahlt', num(signed(e)), e.note, num(e.running)]);
+    rows.push([
+      `${d}.${m}.${y}`,
+      e.dir === 'borrow' ? w.borrow : w.repay,
+      num(signed(e)),
+      e.note,
+      num(e.running),
+      e.createdBy || '',
+    ]);
   }
   // BOM + Semikolon, damit Excel mit deutschen Einstellungen die Datei direkt richtig öffnet.
   const csv = '﻿' + rows.map((row) => row.map(cell).join(';')).join('\r\n');
@@ -416,61 +740,47 @@ $('#import-file').addEventListener('change', async (event) => {
   event.target.value = '';
   if (!file) return;
 
-  let imported;
-  let importedName;
+  let list;
   try {
     const data = JSON.parse(await file.text());
-    const list = Array.isArray(data) ? data : data?.entries;
+    list = Array.isArray(data) ? data : data?.entries;
     if (!Array.isArray(list)) throw new Error('Kein Backup');
-    imported = list.filter(isValidEntry).map(normalizeEntry);
-    if (list.length > 0 && imported.length === 0) throw new Error('Keine gültigen Einträge');
-    importedName = typeof data?.settings?.name === 'string' ? data.settings.name.trim() : '';
   } catch {
     alert('Die Datei konnte nicht gelesen werden. Ist es ein Backup aus dieser App?');
     return;
   }
 
-  const question =
-    `Backup mit ${imported.length} ${imported.length === 1 ? 'Eintrag' : 'Einträgen'} wiederherstellen?` +
-    (entries.length ? `\n\nDie ${entries.length} Einträge auf diesem Gerät werden dabei ersetzt.` : '');
-  if (!confirm(question)) return;
-
-  entries = imported;
-  if (importedName) settings.name = importedName;
-  persistEntries();
-  persistSettings();
-  render();
+  const count = list.length === 1 ? '1 Eintrag' : `${list.length} Einträge`;
+  if (!confirm(`Backup mit ${count} einspielen?\n\nFehlende Einträge kommen dazu, vorhandene bleiben unverändert.`)) {
+    return;
+  }
+  let data;
+  try {
+    data = await send('import', { entries: list });
+  } catch (err) {
+    alert(`Einspielen hat nicht geklappt: ${err.message}`);
+    return;
+  }
   settingsSheet.close();
-  showToast('Backup wiederhergestellt');
+  const changed = data.added + data.restored;
+  showToast(changed ? `${changed} ${changed === 1 ? 'Eintrag' : 'Einträge'} hinzugefügt` : 'Alle Einträge waren schon da');
 });
 
-$('#delete-all').addEventListener('click', () => {
+$('#delete-all').addEventListener('click', async () => {
   if (!entries.length) {
     alert('Es gibt keine Einträge zum Löschen.');
     return;
   }
-  if (!confirm(`Wirklich alle ${entries.length} Einträge löschen?`)) return;
-  const previous = entries;
-  entries = [];
-  persistEntries();
-  render();
+  if (!confirm(`Wirklich alle ${entries.length} Einträge löschen? Sie verschwinden auch bei ${partnerName()}.`)) return;
+  let data;
+  try {
+    data = await send('delete-all', {});
+  } catch (err) {
+    if (err.status !== 401) alert(err.message);
+    return;
+  }
   settingsSheet.close();
-  showToast('Alle Einträge gelöscht', {
-    action: 'Rückgängig',
-    duration: 8000,
-    onAction: () => {
-      entries = previous;
-      persistEntries();
-      render();
-    },
-  });
-});
-
-// Änderungen aus einem anderen Tab übernehmen
-window.addEventListener('storage', (event) => {
-  if (event.key === ENTRIES_KEY) entries = loadEntries();
-  if (event.key === SETTINGS_KEY) settings = loadSettings();
-  render();
+  undoToast('Alle Einträge gelöscht', data.deletedIds || []);
 });
 
 // ---------- Zum Home-Bildschirm hinzufügen ----------
@@ -485,13 +795,12 @@ let installPrompt = null;
 
 function installText() {
   if (installPrompt) {
-    return 'Dann startet sie wie eine normale App vom Home-Bildschirm und funktioniert auch offline.';
+    return 'Dann startet sie wie eine normale App vom Home-Bildschirm.';
   }
   if (isIOS) {
     return (
       `Tippe auf ${SHARE_ICON} <b>Teilen</b> und dann auf <b>„Zum Home-Bildschirm“</b>. ` +
-      'Am besten vor dem ersten Eintrag: Die App auf dem Home-Bildschirm hat einen eigenen Speicher, ' +
-      'Einträge aus Safari musst du sonst per Backup übertragen.'
+      'Danach meldest du dich in der App einmal neu an.'
     );
   }
   return 'Öffne das Browser-Menü (⋮) und tippe auf <b>„App installieren“</b> bzw. <b>„Zum Startbildschirm hinzufügen“</b>.';
@@ -550,8 +859,22 @@ if ('serviceWorker' in navigator) {
   });
 }
 
-// Bittet den Browser, die Daten nicht automatisch zu löschen (v. a. bei installierter App).
-navigator.storage?.persist?.().catch(() => {});
+// ---------- Start ----------
 
-render();
-updateInstallUI();
+// Sofort den letzten bekannten Stand zeigen, dann vom Server aktualisieren.
+const cached = loadJSON(CACHE_KEY, null);
+if (cached?.user) {
+  applyState(cached, { fromCache: true });
+  showScreen('app');
+} else {
+  showScreen('loading');
+}
+load();
+
+// Änderungen der anderen Person holen, sobald die App wieder in den Vordergrund kommt.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && me) load();
+});
+window.addEventListener('online', () => {
+  if (me) load();
+});

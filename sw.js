@@ -1,9 +1,7 @@
 'use strict';
 
-// Wird beim Veröffentlichen automatisch durch den Commit-Hash ersetzt (siehe .github/workflows/pages.yml),
-// damit jede neue Version den alten Cache ablöst.
-const VERSION = '__VERSION__';
-const CACHE = `schulden-${VERSION}`;
+// Bei größeren Änderungen hochzählen, dann wird der alte Cache aufgeräumt.
+const CACHE = 'schulden-v2';
 
 const ASSETS = [
   './',
@@ -35,17 +33,34 @@ self.addEventListener('activate', (event) => {
   );
 });
 
-// Zuerst aus dem Cache (funktioniert offline), sonst aus dem Netz.
+// Zuerst aus dem Netz (damit Updates sofort ankommen), ohne Netz aus dem Cache.
+// Die Daten (api/) laufen nie über den Cache.
 self.addEventListener('fetch', (event) => {
   const { request } = event;
-  if (request.method !== 'GET' || new URL(request.url).origin !== self.location.origin) return;
-
-  event.respondWith(
-    caches.open(CACHE).then(async (cache) => {
-      const cached =
-        (await cache.match(request, { ignoreSearch: true })) ||
-        (request.mode === 'navigate' ? await cache.match('./index.html') : undefined);
-      return cached || fetch(request);
-    })
-  );
+  const url = new URL(request.url);
+  if (request.method !== 'GET' || url.origin !== self.location.origin || url.pathname.includes('/api/')) return;
+  event.respondWith(networkFirst(request));
 });
+
+async function networkFirst(request) {
+  const cache = await caches.open(CACHE);
+  const network = fetch(request.mode === 'navigate' ? request : new Request(request.url, { cache: 'no-cache' })).then(
+    (response) => {
+      if (response.ok && !response.redirected) cache.put(request, response.clone());
+      return response;
+    }
+  );
+  network.catch(() => {}); // Fehler wird unten behandelt
+  // Bei sehr langsamer Verbindung nach 4 Sekunden lieber den Cache nehmen.
+  const timeout = new Promise((resolve) => setTimeout(resolve, 4000));
+  try {
+    const response = await Promise.race([network, timeout]);
+    if (response) return response;
+  } catch {
+    // offline
+  }
+  const cached =
+    (await cache.match(request, { ignoreSearch: true })) ||
+    (request.mode === 'navigate' ? await cache.match('./index.html') : undefined);
+  return cached || network;
+}

@@ -1,7 +1,7 @@
 {
-  "name": "Schulden mit Papa",
+  "name": "Schulden",
   "short_name": "Schulden",
-  "description": "Behalte im Blick, wie viel du Papa schuldest.",
+  "description": "Gemeinsam im Blick behalten, wer wem wie viel schuldet.",
   "lang": "de",
   "id": "./",
   "start_url": "./",

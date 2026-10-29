@@ -15,6 +15,7 @@
   --repay: #15803d;
   --repay-soft: #e5f5ea;
   --danger: #c0262d;
+  --danger-soft: #fdecec;
   --shadow: 0 1px 2px rgb(16 32 30 / 0.06), 0 4px 16px rgb(16 32 30 / 0.06);
   --radius: 16px;
   --safe-top: env(safe-area-inset-top, 0px);
@@ -38,6 +39,7 @@
     --repay: #4ade80;
     --repay-soft: #12301d;
     --danger: #f87171;
+    --danger-soft: #3a1618;
     --shadow: 0 1px 2px rgb(0 0 0 / 0.4);
   }
 }
@@ -69,6 +71,11 @@ input {
   color: inherit;
 }
 
+button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 button {
   cursor: pointer;
 }
@@ -84,6 +91,69 @@ button {
   overflow: hidden;
   clip: rect(0 0 0 0);
   white-space: nowrap;
+}
+
+/* ---------- Anmelden / Einrichten ---------- */
+
+.auth {
+  min-height: 100dvh;
+  padding: calc(var(--safe-top) + 32px) calc(var(--safe-right) + 16px) calc(var(--safe-bottom) + 32px) calc(var(--safe-left) + 16px);
+  background: linear-gradient(to bottom, var(--brand) calc(var(--safe-top) + 190px), var(--bg) calc(var(--safe-top) + 190px));
+}
+
+.auth-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  max-width: 420px;
+  margin: 0 auto;
+}
+
+.auth-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  color: var(--on-brand);
+}
+
+.auth-brand img {
+  width: 64px;
+  height: 64px;
+  border-radius: 16px;
+  box-shadow: 0 0 0 2px rgb(255 255 255 / 0.25);
+}
+
+.auth-brand h1 {
+  margin: 0;
+  font-size: 24px;
+}
+
+.auth-status {
+  margin: 24px 0 0;
+  text-align: center;
+  color: var(--muted);
+}
+
+.auth-card {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+}
+
+.auth-card h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.form-error {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 14px;
 }
 
 /* ---------- Kopfbereich mit Kontostand ---------- */
@@ -230,11 +300,9 @@ button {
 }
 
 .action-title {
-  font-size: 17px;
+  font-size: 16px;
   font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.3;
 }
 
 .action-sub {
@@ -249,6 +317,16 @@ button {
   background: var(--surface);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
+}
+
+.offline-banner {
+  margin: 16px 0 0;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 14px;
+  text-align: center;
 }
 
 .install-hint {
@@ -326,19 +404,26 @@ button {
   background: var(--surface-2);
 }
 
-.entry-dot {
+/* Anfangsbuchstabe der Person, die den Eintrag gemacht hat */
+.entry-avatar {
   flex: none;
-  width: 10px;
-  height: 10px;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
+  font-size: 14px;
+  font-weight: 700;
 }
 
-.entry.borrow .entry-dot {
-  background: var(--borrow);
+.entry.borrow .entry-avatar {
+  background: var(--borrow-soft);
+  color: var(--borrow);
 }
 
-.entry.repay .entry-dot {
-  background: var(--repay);
+.entry.repay .entry-avatar {
+  background: var(--repay-soft);
+  color: var(--repay);
 }
 
 .entry-main {
@@ -575,6 +660,7 @@ dialog.sheet::backdrop {
 .segmented input:checked + span {
   background: var(--surface);
   box-shadow: var(--shadow);
+  color: var(--text);
 }
 
 .segmented input[value="borrow"]:checked + span {
@@ -674,6 +760,58 @@ dialog.sheet::backdrop {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.account-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.account-row p {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.disclosure {
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+
+.disclosure summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+
+.disclosure summary::-webkit-details-marker {
+  display: none;
+}
+
+.disclosure summary::after {
+  content: "›";
+  font-size: 22px;
+  line-height: 1;
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+
+.disclosure[open] summary::after {
+  transform: rotate(90deg);
+}
+
+.disclosure-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 0 16px 16px;
 }
 
 .stack {

@@ -1,0 +1,4 @@
+# Zugangsdaten und Datenbank gehören nicht ins Repository.
+api/config.php
+data/*
+!data/.htaccess
