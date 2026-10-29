@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Schulden</title>
+  <meta name="description" content="Behalte im Blick, wie viel du Papa schuldest.">
+
+  <!-- Home-Bildschirm / PWA -->
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="icons/icon-192.png" type="image/png" sizes="192x192">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <meta name="theme-color" content="#0f5f59">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Schulden">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="top">
+    <div class="top-bar">
+      <h1 class="top-title">Schulden mit <span data-name>Papa</span></h1>
+      <button class="icon-btn" id="open-settings" type="button" aria-label="Einstellungen">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1.08 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.6.85 1 1.51 1H21a2 2 0 1 1 0 4h-.09c-.66 0-1.25.4-1.51 1Z"/></svg>
+      </button>
+    </div>
+    <p class="balance-label" id="balance-label">Ihr seid quitt</p>
+    <p class="balance-amount" id="balance-amount">0,00&nbsp;€</p>
+    <p class="balance-totals" id="balance-totals"></p>
+  </header>
+
+  <main class="content">
+    <div class="actions">
+      <button class="action action-borrow" type="button" data-add="borrow">
+        <span class="action-icon" aria-hidden="true">+</span>
+        <span class="action-text">
+          <span class="action-title">Geliehen</span>
+          <span class="action-sub">von <span data-name>Papa</span> bekommen</span>
+        </span>
+      </button>
+      <button class="action action-repay" type="button" data-add="repay">
+        <span class="action-icon" aria-hidden="true">−</span>
+        <span class="action-text">
+          <span class="action-title">Zurückgezahlt</span>
+          <span class="action-sub">an <span data-name>Papa</span> gegeben</span>
+        </span>
+      </button>
+    </div>
+
+    <section class="card install-hint" id="install-hint" hidden>
+      <div class="install-hint-body">
+        <strong>Als App installieren</strong>
+        <p id="install-hint-text"></p>
+      </div>
+      <div class="install-hint-actions">
+        <button class="btn btn-primary btn-small" id="install-btn" type="button" hidden>Installieren</button>
+        <button class="btn btn-ghost btn-small" id="install-dismiss" type="button">Später</button>
+      </div>
+    </section>
+
+    <section aria-labelledby="history-title">
+      <h2 class="section-title" id="history-title">Verlauf</h2>
+      <div id="history"></div>
+      <p class="empty" id="empty" hidden>
+        Noch keine Einträge.<br>
+        Tippe auf „Geliehen“, wenn dir <span data-name>Papa</span> Geld gibt oder etwas für dich bezahlt.
+      </p>
+    </section>
+  </main>
+
+  <!-- Eintrag hinzufügen / bearbeiten -->
+  <dialog class="sheet" id="entry-sheet" aria-labelledby="entry-title">
+    <form id="entry-form" novalidate>
+      <div class="sheet-head">
+        <button class="link-btn" type="button" data-close>Abbrechen</button>
+        <h2 id="entry-title">Neuer Eintrag</h2>
+        <button class="link-btn link-btn-strong" type="submit">Sichern</button>
+      </div>
+      <div class="sheet-body">
+        <fieldset class="segmented">
+          <legend class="visually-hidden">Art</legend>
+          <label>
+            <input type="radio" name="dir" value="borrow" checked>
+            <span>Geliehen</span>
+          </label>
+          <label>
+            <input type="radio" name="dir" value="repay">
+            <span>Zurückgezahlt</span>
+          </label>
+        </fieldset>
+        <p class="dir-hint" id="dir-hint"></p>
+
+        <label class="field">
+          <span class="field-label">Betrag</span>
+          <span class="amount-input">
+            <input id="amount" name="amount" type="text" inputmode="decimal" autocomplete="off" placeholder="0,00" required>
+            <span class="amount-suffix">€</span>
+          </span>
+          <span class="field-error" id="amount-error" hidden>Bitte einen gültigen Betrag eingeben, z.&nbsp;B. 12,50</span>
+        </label>
+
+        <label class="field">
+          <span class="field-label">Wofür? <span class="optional">(optional)</span></span>
+          <input id="note" name="note" type="text" maxlength="120" autocomplete="off" enterkeyhint="done" placeholder="z. B. Tanken, Handyrechnung">
+        </label>
+
+        <label class="field">
+          <span class="field-label">Datum</span>
+          <input id="date" name="date" type="date" required>
+        </label>
+
+        <button class="btn btn-primary btn-block" type="submit">Sichern</button>
+        <button class="btn btn-danger btn-block" id="delete-entry" type="button" hidden>Eintrag löschen</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Einstellungen -->
+  <dialog class="sheet" id="settings-sheet" aria-labelledby="settings-title">
+    <div class="sheet-head">
+      <span></span>
+      <h2 id="settings-title">Einstellungen</h2>
+      <button class="link-btn link-btn-strong" type="button" data-close>Fertig</button>
+    </div>
+    <div class="sheet-body">
+      <label class="field">
+        <span class="field-label">Bei wem hast du Schulden?</span>
+        <input id="person-name" type="text" maxlength="30" autocomplete="off" placeholder="Papa">
+      </label>
+
+      <h3 class="group-title">Backup</h3>
+      <p class="muted small">
+        Deine Einträge werden nur auf diesem Gerät gespeichert. Mach ab und zu ein Backup,
+        z.&nbsp;B. in die Dateien-App oder per Nachricht an dich selbst.
+      </p>
+      <div class="stack">
+        <button class="btn btn-secondary btn-block" id="export-json" type="button">Backup speichern</button>
+        <button class="btn btn-secondary btn-block" id="import-json" type="button">Backup wiederherstellen</button>
+        <button class="btn btn-secondary btn-block" id="export-csv" type="button">Als Tabelle exportieren (CSV)</button>
+        <input id="import-file" type="file" accept="application/json,.json" hidden>
+      </div>
+
+      <div class="group" id="install-section">
+        <h3 class="group-title">Zum Home-Bildschirm</h3>
+        <p class="muted small" id="install-section-text"></p>
+        <button class="btn btn-primary btn-block" id="install-btn-settings" type="button" hidden>App installieren</button>
+      </div>
+
+      <h3 class="group-title">Gefahrenzone</h3>
+      <button class="btn btn-danger btn-block" id="delete-all" type="button">Alle Einträge löschen</button>
+    </div>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden>
+    <span id="toast-text"></span>
+    <button class="toast-action" id="toast-action" type="button" hidden></button>
+  </div>
+</body>
+</html>
