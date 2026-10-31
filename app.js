@@ -5,6 +5,8 @@ const LEGACY_KEY = 'schulden.entries.v1'; // Einträge aus der ersten Version oh
 const LEGACY_DECLINED_KEY = 'schulden.legacyDeclined';
 const HINT_KEY = 'schulden.installHintDismissed';
 const MAX_CENTS = 100_000_000_00; // 100 Mio. €
+const MAX_PHOTOS = 6; // pro Eintrag, wie auf dem Server
+const MAX_PHOTO_SIDE = 2000; // Pixel – reicht, um Kassenbons gut zu lesen
 
 const euro = new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' });
 const dayFmt = new Intl.DateTimeFormat('de-DE', { weekday: 'short', day: 'numeric', month: 'short' });
@@ -15,8 +17,8 @@ const $ = (sel) => document.querySelector(sel);
 
 // ---------- Zustand ----------
 
-let me = null; // { username, name, role: 'borrower' | 'lender' }
-let partner = null; // { username, name, role }
+let me = null; // { username, name, role: 'borrower' | 'lender', mustChangePassword }
+let partner = null; // { username, name, role, passwordPending }
 let entries = [];
 let storage = null; // { type, location }
 
@@ -57,14 +59,16 @@ class ApiError extends Error {
 }
 
 async function api(action, body) {
-  const init =
-    body === undefined
-      ? { cache: 'no-store' }
-      : {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'schulden' },
-          body: JSON.stringify(body),
-        };
+  let init = { cache: 'no-store' };
+  if (body instanceof FormData) {
+    init = { method: 'POST', headers: { 'X-Requested-With': 'schulden' }, body };
+  } else if (body !== undefined) {
+    init = {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'schulden' },
+      body: JSON.stringify(body),
+    };
+  }
   let response;
   try {
     response = await fetch(`api/index.php?a=${action}`, { credentials: 'same-origin', ...init });
@@ -104,8 +108,46 @@ function applyState(data, { fromCache = false } = {}) {
   partner = data.partner || null;
   entries = Array.isArray(data.entries) ? data.entries : [];
   storage = data.storage || null;
-  if (!fromCache) saveJSON(CACHE_KEY, { user: me, partner, entries, storage });
+  if (fromCache) {
+    // nichts speichern
+  } else if (me.mustChangePassword) {
+    removeKey(CACHE_KEY);
+  } else {
+    saveJSON(CACHE_KEY, { user: me, partner, entries, storage });
+  }
   render();
+}
+
+/** Nach dem Anmelden: erst ein eigenes Passwort festlegen lassen, falls nötig, dann die App. */
+function enterApp() {
+  if (me.mustChangePassword) {
+    const form = $('#own-password-form');
+    form.elements.username.value = me.username;
+    $('#own-password-text').textContent =
+      `Hallo ${me.name}! Du hast dich mit einem Einmal-Passwort angemeldet. ` +
+      'Lege jetzt dein eigenes Passwort fest – nur du kennst es.';
+    showScreen('own-password');
+    return;
+  }
+  showScreen('app');
+  offerLegacyUpload();
+  openShortcut();
+}
+
+/** Verknüpfung „Neuer Eintrag“ (langes Drücken auf das App-Icon) */
+function openShortcut() {
+  const params = new URLSearchParams(location.search);
+  if (!params.has('neu')) return;
+  history.replaceState(null, '', location.pathname);
+  openEntrySheet('borrow');
+}
+
+async function logout() {
+  await api('logout', {}).catch(() => {});
+  clearSession();
+  document.querySelectorAll('dialog[open]').forEach((dialog) => dialog.close());
+  showScreen('login');
+  setFormError(loginForm, '');
 }
 
 function clearSession() {
@@ -157,8 +199,7 @@ function load() {
       return;
     }
     applyState(data);
-    showScreen('app');
-    offerLegacyUpload();
+    enterApp();
   })().finally(() => {
     loading = null;
   });
@@ -272,6 +313,7 @@ function showScreen(name) {
   $('#auth-status').hidden = name !== 'loading';
   $('#login-form').hidden = name !== 'login';
   $('#setup-form').hidden = name !== 'setup';
+  $('#own-password-form').hidden = name !== 'own-password';
   $('#auth-failed').hidden = name !== 'failed';
   if (name === 'app') updateInstallUI();
 }
@@ -342,7 +384,13 @@ function renderEntry(e, w) {
         'span',
         { class: 'entry-main' },
         h('span', { class: 'entry-note' }, e.note || dirLabel),
-        h('span', { class: 'entry-meta' }, e.note ? `${formatDay(e.date)} · ${dirLabel}` : formatDay(e.date))
+        h(
+          'span',
+          { class: 'entry-meta' },
+          e.note ? `${formatDay(e.date)} · ${dirLabel}` : formatDay(e.date),
+          e.photos?.length ? cameraIcon('entry-photo-icon', 'mit Beleg') : null,
+          e.photos?.length > 1 ? ` ${e.photos.length}` : null
+        )
       ),
       h(
         'span',
@@ -352,6 +400,18 @@ function renderEntry(e, w) {
       )
     )
   );
+}
+
+function cameraIcon(className, label = '') {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  if (className) svg.setAttribute('class', className);
+  if (label) svg.setAttribute('aria-label', label);
+  else svg.setAttribute('aria-hidden', 'true');
+  svg.innerHTML =
+    '<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/>' +
+    '<circle cx="12" cy="13" r="3"/>';
+  return svg;
 }
 
 // ---------- Formulare ----------
@@ -421,13 +481,13 @@ loginForm.addEventListener('submit', async (event) => {
     return;
   }
   loginForm.reset();
-  showScreen('app');
-  offerLegacyUpload();
+  enterApp();
 });
 
 setupForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   const f = setupForm.elements;
+  const oneTimePassword = f.partner_password.value;
   setFormError(setupForm, '');
   try {
     await whileBusy(setupForm, () =>
@@ -442,8 +502,8 @@ setupForm.addEventListener('submit', async (event) => {
     return;
   }
   setupForm.reset();
-  showScreen('app');
-  offerLegacyUpload();
+  enterApp();
+  openShareSheet(partner, oneTimePassword);
 });
 
 // Benutzernamen aus dem Namen vorschlagen, solange man ihn nicht selbst ändert.
@@ -467,6 +527,29 @@ for (const prefix of ['me', 'partner']) {
     if (!userInput.dataset.touched) userInput.value = suggestUsername(nameInput.value);
   });
 }
+
+const ownPasswordForm = $('#own-password-form');
+
+ownPasswordForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const f = ownPasswordForm.elements;
+  setFormError(ownPasswordForm, '');
+  if (f.new.value !== f.repeat.value) {
+    setFormError(ownPasswordForm, 'Die beiden Passwörter sind nicht gleich.');
+    return;
+  }
+  try {
+    await whileBusy(ownPasswordForm, () => send('password', { new: f.new.value }));
+  } catch (err) {
+    if (err.status !== 401) setFormError(ownPasswordForm, err.message);
+    return;
+  }
+  ownPasswordForm.reset();
+  enterApp();
+  showToast('Dein Passwort ist gespeichert');
+});
+
+$('#own-password-logout').addEventListener('click', logout);
 
 $('#auth-retry').addEventListener('click', () => {
   showScreen('loading');
@@ -508,6 +591,8 @@ const entryForm = $('#entry-form');
 const amountInput = $('#amount');
 let currentId = null;
 let isNewEntry = true;
+let savedEntryKey = null; // Stand, der schon auf dem Server ist
+let sheetPhotos = []; // { id, url, existing, blob?, removed?, done? }
 
 function openEntrySheet(dir, entry = null) {
   // Neue Einträge bekommen ihre ID schon jetzt, damit ein erneutes Senden nach
@@ -521,6 +606,9 @@ function openEntrySheet(dir, entry = null) {
   $('#date').value = entry ? entry.date : todayISO();
   $('#entry-title').textContent = entry ? 'Eintrag bearbeiten' : 'Neuer Eintrag';
   $('#delete-entry').hidden = !entry;
+  savedEntryKey = entry ? entryKey(entry) : null;
+  sheetPhotos = (entry?.photos || []).map((photo) => ({ id: photo.id, url: photoUrl(photo.id), existing: true }));
+  renderPhotos();
 
   const info = $('#entry-info');
   info.hidden = !entry;
@@ -554,6 +642,135 @@ entryForm.addEventListener('change', (event) => {
 
 amountInput.addEventListener('input', () => setAmountError(false));
 
+const photoUrl = (id) => `api/index.php?a=photo&id=${encodeURIComponent(id)}`;
+const entryKey = (e) => JSON.stringify([e.id, e.dir, e.cents, e.note, e.date]);
+const visiblePhotos = () => sheetPhotos.filter((photo) => !photo.removed);
+
+function renderPhotos() {
+  const tiles = visiblePhotos().map((photo) =>
+    h(
+      'div',
+      { class: 'photo' },
+      h('button', { class: 'photo-open', type: 'button', 'aria-label': 'Beleg ansehen', dataset: { open: photo.id } }, h('img', { src: photo.url, alt: '' })),
+      h('button', { class: 'photo-remove', type: 'button', 'aria-label': 'Beleg entfernen', dataset: { remove: photo.id } }, '×')
+    )
+  );
+  if (tiles.length < MAX_PHOTOS) {
+    tiles.push(h('button', { class: 'photo-add', type: 'button', dataset: { add: 'photo' } }, cameraIcon(), 'Foto'));
+  }
+  $('#photo-list').replaceChildren(...tiles);
+}
+
+$('#photo-list').addEventListener('click', (event) => {
+  const target = event.target.closest('button');
+  if (!target) return;
+  if (target.dataset.add) {
+    $('#photo-input').click();
+    return;
+  }
+  const photo = sheetPhotos.find((p) => p.id === (target.dataset.open || target.dataset.remove));
+  if (!photo) return;
+  if (target.dataset.open) {
+    openViewer(photo.url);
+  } else if (photo.existing) {
+    photo.removed = true; // wird beim Sichern gelöscht
+    renderPhotos();
+  } else {
+    URL.revokeObjectURL(photo.url);
+    sheetPhotos = sheetPhotos.filter((p) => p !== photo);
+    renderPhotos();
+  }
+});
+
+$('#photo-input').addEventListener('change', async (event) => {
+  const files = [...event.target.files];
+  event.target.value = '';
+  setFormError(entryForm, '');
+  const free = MAX_PHOTOS - visiblePhotos().length;
+  if (files.length > free) setFormError(entryForm, `Höchstens ${MAX_PHOTOS} Fotos pro Eintrag.`);
+  for (const file of files.slice(0, free)) {
+    try {
+      const blob = await shrinkImage(file);
+      sheetPhotos.push({ id: newId(), url: URL.createObjectURL(blob), blob, existing: false });
+      renderPhotos();
+    } catch (err) {
+      setFormError(entryForm, err.message);
+    }
+  }
+});
+
+/**
+ * Fotos vor dem Hochladen verkleinern (Handyfotos haben oft 5–10 MB). Nebenbei fallen dabei
+ * die Zusatzdaten im Foto weg, z. B. der Aufnahmeort.
+ */
+async function shrinkImage(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = new Image();
+    img.src = url;
+    await img.decode();
+    const scale = Math.min(1, MAX_PHOTO_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(img.naturalWidth * scale);
+    canvas.height = Math.round(img.naturalHeight * scale);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.82));
+    if (!blob) throw new Error('toBlob');
+    return blob;
+  } catch {
+    throw new Error(`„${file.name}“ konnte nicht als Bild gelesen werden.`);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+entrySheet.addEventListener('close', () => {
+  for (const photo of sheetPhotos) {
+    if (photo.blob) URL.revokeObjectURL(photo.url);
+  }
+  sheetPhotos = [];
+});
+
+const viewer = $('#viewer');
+
+function openViewer(url) {
+  $('#viewer-img').src = url;
+  viewer.showModal();
+}
+
+viewer.addEventListener('click', () => viewer.close());
+
+/** Eintrag sichern, danach entfernte Fotos löschen und neue hochladen. */
+async function saveEntryWithPhotos(entry) {
+  const key = entryKey(entry);
+  if (key !== savedEntryKey) {
+    await send('save', entry);
+    savedEntryKey = key;
+  }
+  for (const photo of sheetPhotos.filter((p) => p.existing && p.removed && !p.done)) {
+    await send('photo-delete', { id: photo.id });
+    photo.done = true;
+  }
+  const uploads = sheetPhotos.filter((p) => !p.existing && !p.done);
+  const button = entryForm.querySelector('.sheet-body button[type=submit]');
+  try {
+    for (const [index, photo] of uploads.entries()) {
+      button.textContent = uploads.length > 1 ? `Foto ${index + 1} von ${uploads.length} wird hochgeladen …` : 'Foto wird hochgeladen …';
+      const form = new FormData();
+      form.append('id', photo.id);
+      form.append('entry', entry.id);
+      form.append('photo', photo.blob, `${photo.id}.jpg`);
+      await send('photo-upload', form);
+      photo.done = true;
+    }
+  } finally {
+    button.textContent = 'Sichern';
+  }
+}
+
 entryForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   const cents = parseCents(amountInput.value);
@@ -573,7 +790,7 @@ entryForm.addEventListener('submit', async (event) => {
 
   setFormError(entryForm, '');
   try {
-    await whileBusy(entryForm, () => send('save', entry));
+    await whileBusy(entryForm, () => saveEntryWithPhotos(entry));
   } catch (err) {
     if (err.status !== 401) setFormError(entryForm, err.message);
     return;
@@ -626,7 +843,13 @@ $('#open-settings').addEventListener('click', () => {
   $('#me-username').textContent = me.username;
   $('#storage-text').textContent = storage
     ? `Eure Einträge liegen auf eurem Server (${storage.type}: ${storage.location}). ` +
-      `${me.name} und ${partnerName()} sehen dieselben Daten. Ein Backup als Datei schadet trotzdem nicht.`
+      `${me.name} und ${partnerName()} sehen dieselben Daten. Fotos von Belegen liegen im Ordner ${storage.photos}. ` +
+      'Ein Backup als Datei schadet trotzdem nicht (es enthält die Einträge, aber keine Fotos).'
+    : '';
+  $('#partner-status').textContent = partner
+    ? partner.passwordPending
+      ? `${partner.name} hat sich noch nicht angemeldet bzw. das Einmal-Passwort noch nicht durch ein eigenes ersetzt.`
+      : `${partner.name} hat ein eigenes Passwort, das nur ${partner.name} kennt.`
     : '';
   for (const form of [passwordForm, partnerPasswordForm]) {
     form.reset();
@@ -638,13 +861,7 @@ $('#open-settings').addEventListener('click', () => {
   settingsSheet.showModal();
 });
 
-$('#logout').addEventListener('click', async () => {
-  await api('logout', {}).catch(() => {});
-  clearSession();
-  settingsSheet.close();
-  showScreen('login');
-  setFormError(loginForm, '');
-});
+$('#logout').addEventListener('click', logout);
 
 passwordForm.addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -663,17 +880,49 @@ passwordForm.addEventListener('submit', async (event) => {
 partnerPasswordForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   const f = partnerPasswordForm.elements;
+  const oneTimePassword = f.new.value;
   setFormError(partnerPasswordForm, '');
   try {
-    await whileBusy(partnerPasswordForm, () =>
-      send('partner-password', { current: f.current.value, new: f.new.value })
-    );
+    await whileBusy(partnerPasswordForm, () => send('partner-password', { current: f.current.value, new: oneTimePassword }));
   } catch (err) {
     if (err.status !== 401) setFormError(partnerPasswordForm, err.message);
     return;
   }
   settingsSheet.close();
-  showToast(`Neues Passwort für ${partnerName()} gesetzt`);
+  openShareSheet(partner, oneTimePassword);
+});
+
+// ---------- Zugangsdaten an die andere Person schicken ----------
+
+const shareSheet = $('#share-sheet');
+
+function openShareSheet(person, oneTimePassword) {
+  if (!person) return;
+  const appUrl = location.origin + location.pathname.replace(/index\.html$/, '');
+  const text =
+    `Hallo ${person.name}! Hier ist unsere Schulden-App:\n${appUrl}\n\n` +
+    `Benutzername: ${person.username}\nEinmal-Passwort: ${oneTimePassword}\n\n` +
+    'Beim ersten Anmelden legst du dein eigenes Passwort fest. ' +
+    'Tipp: Über „Teilen → Zum Home-Bildschirm“ wird daraus eine App.';
+  $('#share-name').textContent = person.name;
+  document.querySelectorAll('.share-name').forEach((el) => (el.textContent = person.name));
+  $('#share-text').textContent = text;
+  $('#share-send').hidden = !navigator.share;
+  $('#share-copy').textContent = 'Text kopieren';
+  shareSheet.showModal();
+}
+
+$('#share-send').addEventListener('click', () => {
+  navigator.share({ text: $('#share-text').textContent }).catch(() => {});
+});
+
+$('#share-copy').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText($('#share-text').textContent);
+    $('#share-copy').textContent = 'Kopiert ✓';
+  } catch {
+    $('#share-copy').textContent = 'Kopieren ging nicht – bitte Text markieren';
+  }
 });
 
 function backupFilename(ext) {
@@ -863,7 +1112,7 @@ if ('serviceWorker' in navigator) {
 
 // Sofort den letzten bekannten Stand zeigen, dann vom Server aktualisieren.
 const cached = loadJSON(CACHE_KEY, null);
-if (cached?.user) {
+if (cached?.user && !cached.user.mustChangePassword) {
   applyState(cached, { fromCache: true });
   showScreen('app');
 } else {

@@ -12,7 +12,9 @@ const SESSION_SECONDS = 365 * 24 * 3600;
 const MAX_CENTS = 10000000000; // 100 Mio. €
 const LOGIN_WINDOW_SECONDS = 15 * 60;
 const LOGIN_MAX_FAILURES = 8;
-const SCHEMA_VERSION = '1';
+const SCHEMA_VERSION = 2;
+const MAX_PHOTOS_PER_ENTRY = 6;
+const MAX_PHOTO_BYTES = 8 * 1024 * 1024;
 
 // ---------- Antworten und Anfragen ----------
 
@@ -31,8 +33,8 @@ function fail(int $status, string $message): void
     respond(['error' => $message], $status);
 }
 
-/** Liest den JSON-Body einer POST-Anfrage. Der Zusatz-Header schützt vor Anfragen fremder Seiten. */
-function read_json(): array
+/** Nur POST mit Zusatz-Header – das schützt vor Anfragen, die von fremden Seiten ausgelöst werden. */
+function require_post(): void
 {
     if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
         fail(405, 'Diese Aktion geht nur per POST.');
@@ -40,6 +42,12 @@ function read_json(): array
     if (($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') !== 'schulden') {
         fail(403, 'Ungültige Anfrage.');
     }
+}
+
+/** Liest den JSON-Body einer POST-Anfrage. */
+function read_json(): array
+{
+    require_post();
     $data = json_decode((string) file_get_contents('php://input', false, null, 0, 5000000), true);
     if (!is_array($data)) {
         fail(400, 'Ungültige Daten.');
@@ -92,36 +100,55 @@ function db_driver(PDO $pdo): string
 }
 
 /**
- * Ort der SQLite-Datei. Bevorzugt ein Ordner neben dem Web-Ordner, damit die Datei nie
- * über das Internet abrufbar ist (bei Plesk: /var/www/vhosts/<domain>/schulden-daten).
- * Geht das nicht, landet sie im Ordner data/ der App, der per .htaccess gesperrt ist.
+ * Ordner für Datenbank-Datei und Fotos. Bevorzugt ein Ordner neben dem Web-Ordner, damit
+ * nichts davon über das Internet abrufbar ist (bei Plesk: /var/www/vhosts/<domain>/schulden-daten).
+ * Geht das nicht, wird der Ordner data/ der App genutzt, der per .htaccess gesperrt ist.
  */
+function data_dir(): string
+{
+    static $dir = null;
+    if ($dir !== null) {
+        return $dir;
+    }
+
+    $inside = inside_data_dir();
+    $outside = outside_data_dir();
+
+    // Einen Ordner, in dem schon eine Datenbank liegt, immer weiterverwenden.
+    if ($outside !== null && @is_file($outside . '/schulden.sqlite')) {
+        return $dir = $outside;
+    }
+    if (is_file($inside . '/.ht.schulden.sqlite')) {
+        return $dir = $inside;
+    }
+    if ($outside !== null && (@is_dir($outside) || @mkdir($outside, 0700)) && @is_writable($outside)) {
+        return $dir = $outside;
+    }
+    if (!is_dir($inside)) {
+        mkdir($inside, 0700, true);
+    }
+    return $dir = $inside;
+}
+
+function inside_data_dir(): string
+{
+    return dirname(__DIR__) . '/data';
+}
+
+/** Im Ersatz-Ordner beginnt der Name mit ".ht", den Apache zusätzlich von sich aus sperrt. */
 function sqlite_path(): string
 {
-    static $path = null;
-    if ($path !== null) {
-        return $path;
-    }
+    $dir = data_dir();
+    return $dir . ($dir === inside_data_dir() ? '/.ht.schulden.sqlite' : '/schulden.sqlite');
+}
 
-    $insideDir = dirname(__DIR__) . '/data';
-    $inside = $insideDir . '/.ht.schulden.sqlite';
-    $outsideDir = outside_data_dir();
-    $outside = $outsideDir === null ? null : $outsideDir . '/schulden.sqlite';
-
-    // Eine vorhandene Datei immer weiterverwenden.
-    if ($outside !== null && @is_file($outside)) {
-        return $path = $outside;
+function photo_dir(): string
+{
+    $dir = data_dir() . '/belege';
+    if (!is_dir($dir)) {
+        mkdir($dir, 0700, true);
     }
-    if (is_file($inside)) {
-        return $path = $inside;
-    }
-    if ($outside !== null && (@is_dir($outsideDir) || @mkdir($outsideDir, 0700)) && @is_writable($outsideDir)) {
-        return $path = $outside;
-    }
-    if (!is_dir($insideDir)) {
-        mkdir($insideDir, 0700, true);
-    }
-    return $path = $inside;
+    return $dir;
 }
 
 function outside_data_dir(): ?string
@@ -138,30 +165,78 @@ function outside_data_dir(): ?string
 function storage_info(): array
 {
     $dsn = (string) (config()['db_dsn'] ?? '');
+    $photos = data_dir() . '/belege';
     if (db_driver(db()) === 'sqlite') {
         return [
             'type' => 'SQLite-Datei',
             'location' => strpos($dsn, 'sqlite:') === 0 ? substr($dsn, 7) : sqlite_path(),
+            'photos' => $photos,
         ];
     }
     return [
         'type' => 'MySQL-Datenbank',
         'location' => preg_match('/dbname=([^;]+)/', $dsn, $m) ? $m[1] : '',
+        'photos' => $photos,
     ];
 }
 
 function migrate(PDO $pdo): void
 {
+    $version = 0;
     try {
-        if ($pdo->query("SELECT v FROM meta WHERE k = 'schema'")->fetchColumn() === SCHEMA_VERSION) {
-            return;
-        }
+        $version = (int) $pdo->query("SELECT v FROM meta WHERE k = 'schema'")->fetchColumn();
     } catch (PDOException $e) {
         // Datenbank ist noch leer.
+    }
+    if ($version >= SCHEMA_VERSION) {
+        return;
     }
 
     // Bewusst schlichtes SQL, das in SQLite und MySQL/MariaDB gleich funktioniert.
     $suffix = db_driver($pdo) === 'mysql' ? ' DEFAULT CHARSET=utf8mb4' : '';
+    if ($version < 1) {
+        migrate_v1($pdo, $suffix);
+    }
+    if ($version < 2) {
+        // Einmal-Passwort: die Person muss beim nächsten Anmelden ein eigenes festlegen.
+        if (!column_exists($pdo, 'users', 'must_change')) {
+            $pdo->exec('ALTER TABLE users ADD COLUMN must_change INTEGER NOT NULL DEFAULT 0');
+        }
+        $pdo->exec(
+            'CREATE TABLE IF NOT EXISTS photos (
+                id VARCHAR(64) NOT NULL PRIMARY KEY,
+                entry_id VARCHAR(64) NOT NULL,
+                file VARCHAR(64) NOT NULL,
+                mime VARCHAR(20) NOT NULL,
+                bytes BIGINT NOT NULL,
+                width INTEGER NOT NULL,
+                height INTEGER NOT NULL,
+                created_by VARCHAR(30) NOT NULL,
+                created_at BIGINT NOT NULL
+            )' . $suffix
+        );
+    }
+
+    $pdo->prepare("UPDATE meta SET v = ? WHERE k = 'schema'")->execute([(string) SCHEMA_VERSION]);
+    try {
+        $pdo->prepare("INSERT INTO meta (k, v) VALUES ('schema', ?)")->execute([(string) SCHEMA_VERSION]);
+    } catch (PDOException $e) {
+        // Eintrag gab es schon (oben aktualisiert) oder eine parallele Anfrage war schneller.
+    }
+}
+
+function column_exists(PDO $pdo, string $table, string $column): bool
+{
+    try {
+        $pdo->query("SELECT $column FROM $table WHERE 1 = 0");
+        return true;
+    } catch (PDOException $e) {
+        return false;
+    }
+}
+
+function migrate_v1(PDO $pdo, string $suffix): void
+{
     $tables = [
         'CREATE TABLE IF NOT EXISTS meta (
             k VARCHAR(30) NOT NULL PRIMARY KEY,
@@ -201,11 +276,6 @@ function migrate(PDO $pdo): void
     ];
     foreach ($tables as $sql) {
         $pdo->exec($sql . $suffix);
-    }
-    try {
-        $pdo->prepare("INSERT INTO meta (k, v) VALUES ('schema', ?)")->execute([SCHEMA_VERSION]);
-    } catch (PDOException $e) {
-        // Eine parallele Anfrage war schneller.
     }
 }
 
@@ -257,7 +327,7 @@ function current_user(): ?array
         return null;
     }
     $stmt = db()->prepare(
-        'SELECT s.last_seen, u.username, u.name, u.role
+        'SELECT s.last_seen, u.username, u.name, u.role, u.must_change
            FROM sessions s JOIN users u ON u.username = s.username
           WHERE s.token_hash = ?'
     );
@@ -277,21 +347,30 @@ function current_user(): ?array
         db()->prepare('UPDATE sessions SET last_seen = ? WHERE token_hash = ?')->execute([$now, $hash]);
         set_session_cookie((string) $_COOKIE[SESSION_COOKIE], $now + SESSION_SECONDS);
     }
-    return ['username' => $row['username'], 'name' => $row['name'], 'role' => $row['role']];
+    return [
+        'username' => $row['username'],
+        'name' => $row['name'],
+        'role' => $row['role'],
+        'must_change' => (int) $row['must_change'],
+    ];
 }
 
-function require_user(): array
+/** Angemeldete Person. Wer noch das Einmal-Passwort hat, darf nur ein eigenes Passwort festlegen. */
+function require_user(bool $allowPendingPassword = false): array
 {
     $user = current_user();
     if ($user === null) {
         fail(401, 'Bitte melde dich an.');
+    }
+    if ($user['must_change'] && !$allowPendingPassword) {
+        fail(403, 'Bitte lege zuerst dein eigenes Passwort fest.');
     }
     return $user;
 }
 
 function find_user(string $username): ?array
 {
-    $stmt = db()->prepare('SELECT username, name, role, password_hash FROM users WHERE username = ?');
+    $stmt = db()->prepare('SELECT username, name, role, must_change, password_hash FROM users WHERE username = ?');
     $stmt->execute([$username]);
     return $stmt->fetch() ?: null;
 }
@@ -356,7 +435,7 @@ function clean_entry($raw): ?array
     $date = $raw['date'] ?? null;
     $note = clean_text($raw['note'] ?? '', 120);
 
-    if (!is_string($id) || !preg_match('/^[A-Za-z0-9_-]{6,64}$/', $id)) {
+    if (!valid_id($id)) {
         return null;
     }
     if ($dir !== 'borrow' && $dir !== 'repay') {
@@ -389,7 +468,12 @@ function load_entries(): array
           ORDER BY e.entry_date, e.created_at'
     )->fetchAll();
 
-    return array_map(static function (array $row): array {
+    $photos = [];
+    foreach (db()->query('SELECT id, entry_id, width, height FROM photos ORDER BY created_at') as $photo) {
+        $photos[$photo['entry_id']][] = ['id' => $photo['id'], 'w' => (int) $photo['width'], 'h' => (int) $photo['height']];
+    }
+
+    return array_map(static function (array $row) use ($photos): array {
         return [
             'id' => $row['id'],
             'dir' => $row['dir'],
@@ -400,6 +484,7 @@ function load_entries(): array
             'createdBy' => $row['created_name'],
             'updatedAt' => $row['updated_at'] === null ? null : (int) $row['updated_at'],
             'updatedBy' => $row['updated_name'],
+            'photos' => $photos[$row['id']] ?? [],
         ];
     }, $rows);
 }
@@ -407,14 +492,40 @@ function load_entries(): array
 /** Alles, was die App nach dem Anmelden braucht. */
 function state(array $user, array $extra = []): array
 {
-    $stmt = db()->prepare('SELECT username, name, role FROM users WHERE username <> ?');
+    $stmt = db()->prepare('SELECT username, name, role, must_change FROM users WHERE username <> ?');
     $stmt->execute([$user['username']]);
+    $partner = $stmt->fetch() ?: null;
+    $pending = (bool) $user['must_change'];
 
     return array_merge([
         'needsSetup' => false,
-        'user' => ['username' => $user['username'], 'name' => $user['name'], 'role' => $user['role']],
-        'partner' => $stmt->fetch() ?: null,
-        'entries' => load_entries(),
-        'storage' => storage_info(),
+        'user' => [
+            'username' => $user['username'],
+            'name' => $user['name'],
+            'role' => $user['role'],
+            'mustChangePassword' => $pending,
+        ],
+        'partner' => $partner === null ? null : [
+            'username' => $partner['username'],
+            'name' => $partner['name'],
+            'role' => $partner['role'],
+            'passwordPending' => (bool) $partner['must_change'],
+        ],
+        // Mit Einmal-Passwort gibt es erst nach dem Festlegen des eigenen Passworts Daten.
+        'entries' => $pending ? [] : load_entries(),
+        'storage' => $pending ? null : storage_info(),
     ], $extra);
+}
+
+/** Eintrag holen, der nicht gelöscht ist. */
+function find_entry(string $id): ?array
+{
+    $stmt = db()->prepare('SELECT id FROM entries WHERE id = ? AND deleted_at IS NULL');
+    $stmt->execute([$id]);
+    return $stmt->fetch() ?: null;
+}
+
+function valid_id($id): bool
+{
+    return is_string($id) && preg_match('/^[A-Za-z0-9_-]{6,64}$/', $id) === 1;
 }

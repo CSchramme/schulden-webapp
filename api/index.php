@@ -41,6 +41,15 @@ try {
         case 'partner-password':
             action_partner_password();
             break;
+        case 'photo':
+            action_photo();
+            break;
+        case 'photo-upload':
+            action_photo_upload();
+            break;
+        case 'photo-delete':
+            action_photo_delete();
+            break;
         default:
             fail(404, 'Unbekannte Aktion.');
     }
@@ -54,11 +63,14 @@ function action_state(): void
     if (user_count() === 0) {
         respond(['needsSetup' => true, 'user' => null]);
     }
-    $user = current_user();
+    $user = current_user(); // auch mit Einmal-Passwort, die App zeigt dann „Eigenes Passwort festlegen“
     respond($user === null ? ['needsSetup' => false, 'user' => null] : state($user));
 }
 
-/** Legt beim ersten Start beide Konten an. Danach ist keine Registrierung mehr möglich. */
+/**
+ * Legt beim ersten Start beide Konten an. Danach ist keine Registrierung mehr möglich.
+ * Die andere Person bekommt ein Einmal-Passwort und legt beim ersten Anmelden ein eigenes fest.
+ */
 function action_setup(): void
 {
     $data = read_json();
@@ -76,20 +88,22 @@ function action_setup(): void
     $myPassword = require_password($me['password'] ?? null, 'Dein Passwort');
     $otherName = require_name($other['name'] ?? null, 'den Namen der anderen Person');
     $otherUsername = require_username($other['username'] ?? null, "Benutzername für $otherName");
-    $otherPassword = require_password($other['password'] ?? null, "Das Passwort für $otherName");
+    $otherPassword = require_password($other['password'] ?? null, "Das Einmal-Passwort für $otherName");
     if ($myUsername === $otherUsername) {
         fail(422, 'Die beiden Benutzernamen müssen unterschiedlich sein.');
     }
 
     $db = db();
     $now = time();
-    $insert = $db->prepare('INSERT INTO users (username, name, role, password_hash, created_at) VALUES (?, ?, ?, ?, ?)');
+    $insert = $db->prepare(
+        'INSERT INTO users (username, name, role, password_hash, must_change, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+    );
     $db->beginTransaction();
     try {
         // Der feste Schlüssel sorgt dafür, dass die Einrichtung nur ein einziges Mal klappt.
         $db->prepare("INSERT INTO meta (k, v) VALUES ('setup', ?)")->execute([(string) $now]);
-        $insert->execute([$myUsername, $myName, $myRole, password_hash($myPassword, PASSWORD_DEFAULT), $now]);
-        $insert->execute([$otherUsername, $otherName, $otherRole, password_hash($otherPassword, PASSWORD_DEFAULT), $now]);
+        $insert->execute([$myUsername, $myName, $myRole, password_hash($myPassword, PASSWORD_DEFAULT), 0, $now]);
+        $insert->execute([$otherUsername, $otherName, $otherRole, password_hash($otherPassword, PASSWORD_DEFAULT), 1, $now]);
         $db->commit();
     } catch (PDOException $e) {
         $db->rollBack();
@@ -97,7 +111,7 @@ function action_setup(): void
     }
 
     start_session($myUsername);
-    respond(state(['username' => $myUsername, 'name' => $myName, 'role' => $myRole]));
+    respond(state(['username' => $myUsername, 'name' => $myName, 'role' => $myRole, 'must_change' => 0]));
 }
 
 function action_login(): void
@@ -260,26 +274,40 @@ function action_import(): void
     respond(state($user, ['added' => $added, 'restored' => $restored]));
 }
 
+/**
+ * Eigenes Passwort ändern. Wer sich gerade mit einem Einmal-Passwort angemeldet hat, muss es
+ * nicht noch einmal eingeben, aber ein anderes wählen.
+ */
 function action_password(): void
 {
-    $user = require_user();
+    $user = require_user(true);
     $data = read_json();
     $full = find_user($user['username']);
-    if (!password_verify(is_string($data['current'] ?? null) ? $data['current'] : '', $full['password_hash'])) {
+    $pending = (bool) $full['must_change'];
+    if (!$pending && !password_verify(is_string($data['current'] ?? null) ? $data['current'] : '', $full['password_hash'])) {
         fail(403, 'Dein aktuelles Passwort stimmt nicht.');
     }
     $new = require_password($data['new'] ?? null, 'Das neue Passwort');
+    if (password_verify($new, $full['password_hash'])) {
+        fail(422, $pending
+            ? 'Bitte wähle ein anderes Passwort als das Einmal-Passwort.'
+            : 'Das neue Passwort ist dasselbe wie das alte.');
+    }
 
     $db = db();
-    $db->prepare('UPDATE users SET password_hash = ? WHERE username = ?')
+    $db->prepare('UPDATE users SET password_hash = ?, must_change = 0 WHERE username = ?')
         ->execute([password_hash($new, PASSWORD_DEFAULT), $user['username']]);
     // Andere Geräte abmelden, dieses bleibt angemeldet.
     $db->prepare('DELETE FROM sessions WHERE username = ? AND token_hash <> ?')
         ->execute([$user['username'], session_token_hash()]);
-    respond(['ok' => true]);
+    $user['must_change'] = 0;
+    respond(state($user));
 }
 
-/** Falls die andere Person ihr Passwort vergessen hat. Bestätigung mit dem eigenen Passwort. */
+/**
+ * Falls die andere Person ihr Passwort vergessen hat: Einmal-Passwort setzen, das sie beim
+ * nächsten Anmelden durch ein eigenes ersetzen muss. Bestätigung mit dem eigenen Passwort.
+ */
 function action_partner_password(): void
 {
     $user = require_user();
@@ -294,11 +322,116 @@ function action_partner_password(): void
     if (!$partner) {
         fail(404, 'Es gibt kein zweites Konto.');
     }
-    $new = require_password($data['new'] ?? null, "Das neue Passwort für {$partner['name']}");
+    $new = require_password($data['new'] ?? null, "Das Einmal-Passwort für {$partner['name']}");
 
     $db = db();
-    $db->prepare('UPDATE users SET password_hash = ? WHERE username = ?')
+    $db->prepare('UPDATE users SET password_hash = ?, must_change = 1 WHERE username = ?')
         ->execute([password_hash($new, PASSWORD_DEFAULT), $partner['username']]);
     $db->prepare('DELETE FROM sessions WHERE username = ?')->execute([$partner['username']]);
-    respond(['ok' => true]);
+    respond(state($user));
+}
+
+/** Foto ausliefern – nur für Angemeldete, die Dateien liegen nicht im Web-Ordner. */
+function action_photo(): void
+{
+    require_user();
+    $id = $_GET['id'] ?? '';
+    if (!valid_id($id)) {
+        fail(404, 'Foto nicht gefunden.');
+    }
+    $stmt = db()->prepare('SELECT file, mime FROM photos WHERE id = ?');
+    $stmt->execute([$id]);
+    $photo = $stmt->fetch();
+    $path = $photo ? photo_dir() . '/' . $photo['file'] : '';
+    if (!$photo || !is_file($path)) {
+        fail(404, 'Foto nicht gefunden.');
+    }
+
+    header('Content-Type: ' . $photo['mime']);
+    header('Content-Length: ' . filesize($path));
+    header('Content-Disposition: inline');
+    header('Cache-Control: private, max-age=31536000, immutable');
+    header('X-Content-Type-Options: nosniff');
+    header("Content-Security-Policy: default-src 'none'");
+    readfile($path);
+    exit;
+}
+
+/** Foto (Beleg) an einen Eintrag hängen. Die App verkleinert Fotos vorher auf eine handliche Größe. */
+function action_photo_upload(): void
+{
+    $user = require_user();
+    require_post();
+
+    // Ist die Anfrage größer als post_max_size, verwirft PHP alle Felder.
+    if (empty($_POST) && empty($_FILES) && (int) ($_SERVER['CONTENT_LENGTH'] ?? 0) > 0) {
+        fail(413, 'Das Foto ist zu groß für den Server.');
+    }
+    $id = $_POST['id'] ?? '';
+    $entryId = $_POST['entry'] ?? '';
+    if (!valid_id($id) || !valid_id($entryId)) {
+        fail(422, 'Ungültige Angaben zum Foto.');
+    }
+    if (find_entry($entryId) === null) {
+        fail(404, 'Den Eintrag zu diesem Foto gibt es nicht (mehr).');
+    }
+
+    $db = db();
+    $stmt = $db->prepare('SELECT id FROM photos WHERE id = ?');
+    $stmt->execute([$id]);
+    if ($stmt->fetchColumn() !== false) {
+        respond(state($user)); // schon hochgeladen (z. B. erneuter Versuch nach Verbindungsabbruch)
+    }
+    $stmt = $db->prepare('SELECT COUNT(*) FROM photos WHERE entry_id = ?');
+    $stmt->execute([$entryId]);
+    if ((int) $stmt->fetchColumn() >= MAX_PHOTOS_PER_ENTRY) {
+        fail(422, 'Mehr als ' . MAX_PHOTOS_PER_ENTRY . ' Fotos pro Eintrag gehen nicht.');
+    }
+
+    $file = $_FILES['photo'] ?? null;
+    $error = is_array($file) ? ($file['error'] ?? UPLOAD_ERR_NO_FILE) : UPLOAD_ERR_NO_FILE;
+    if ($error === UPLOAD_ERR_INI_SIZE || $error === UPLOAD_ERR_FORM_SIZE) {
+        fail(413, 'Das Foto ist zu groß für den Server.');
+    }
+    if ($error !== UPLOAD_ERR_OK || !is_uploaded_file($file['tmp_name'])) {
+        fail(400, 'Das Foto ist nicht richtig angekommen. Bitte versuch es noch einmal.');
+    }
+    if ($file['size'] > MAX_PHOTO_BYTES) {
+        fail(413, 'Das Foto ist zu groß (höchstens 8 MB).');
+    }
+    $types = [IMAGETYPE_JPEG => 'image/jpeg', IMAGETYPE_PNG => 'image/png', IMAGETYPE_WEBP => 'image/webp'];
+    $info = @getimagesize($file['tmp_name']);
+    if ($info === false || !isset($types[$info[2]])) {
+        fail(415, 'Das ist kein unterstütztes Bild (JPEG, PNG oder WebP).');
+    }
+
+    // Eigener Zufallsname ohne Endung: nicht erratbar und wird nie als Bild direkt ausgeliefert.
+    $name = bin2hex(random_bytes(16));
+    if (!move_uploaded_file($file['tmp_name'], photo_dir() . '/' . $name)) {
+        throw new RuntimeException('Foto konnte nicht gespeichert werden');
+    }
+    $db->prepare(
+        'INSERT INTO photos (id, entry_id, file, mime, bytes, width, height, created_by, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    )->execute([$id, $entryId, $name, $types[$info[2]], (int) $file['size'], (int) $info[0], (int) $info[1], $user['username'], now_ms()]);
+
+    respond(state($user));
+}
+
+function action_photo_delete(): void
+{
+    $user = require_user();
+    $data = read_json();
+    $id = $data['id'] ?? '';
+    if (valid_id($id)) {
+        $db = db();
+        $stmt = $db->prepare('SELECT file FROM photos WHERE id = ?');
+        $stmt->execute([$id]);
+        $file = $stmt->fetchColumn();
+        if ($file !== false) {
+            $db->prepare('DELETE FROM photos WHERE id = ?')->execute([$id]);
+            @unlink(photo_dir() . '/' . $file);
+        }
+    }
+    respond(state($user));
 }

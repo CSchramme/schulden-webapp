@@ -1,14 +1,14 @@
 'use strict';
 
 // Bei größeren Änderungen hochzählen, dann wird der alte Cache aufgeräumt.
-const CACHE = 'schulden-v2';
+const CACHE = 'schulden-v3';
 
 const ASSETS = [
   './',
   './index.html',
   './styles.css',
   './app.js',
-  './manifest.webmanifest',
+  './manifest.json',
   './icons/favicon.svg',
   './icons/icon-192.png',
   './icons/icon-512.png',

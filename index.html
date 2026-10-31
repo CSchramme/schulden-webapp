@@ -7,7 +7,7 @@
   <meta name="description" content="Gemeinsam im Blick behalten, wer wem wie viel schuldet.">
 
   <!-- Home-Bildschirm / PWA -->
-  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="manifest" href="manifest.json">
   <link rel="icon" href="icons/favicon.svg" type="image/svg+xml">
   <link rel="icon" href="icons/icon-192.png" type="image/png" sizes="192x192">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
@@ -43,6 +43,7 @@
         </label>
         <p class="form-error" data-error hidden></p>
         <button class="btn btn-primary btn-block" type="submit">Anmelden</button>
+        <p class="muted small center">Du bleibst auf diesem Gerät angemeldet.</p>
       </form>
 
       <form class="card auth-card" id="setup-form" hidden novalidate>
@@ -84,12 +85,31 @@
           <input name="partner_username" type="text" maxlength="30" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" required>
         </label>
         <label class="field">
-          <span class="field-label">Passwort <span class="optional">(mind. 8 Zeichen)</span></span>
-          <input name="partner_password" type="password" autocomplete="new-password" required>
+          <span class="field-label">Einmal-Passwort <span class="optional">(mind. 8 Zeichen)</span></span>
+          <input name="partner_password" type="text" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" required>
+          <span class="field-hint">Damit meldet sich die andere Person das erste Mal an und legt dann ein eigenes Passwort fest, das du nicht kennst.</span>
         </label>
 
         <p class="form-error" data-error hidden></p>
         <button class="btn btn-primary btn-block" type="submit">Konten anlegen</button>
+      </form>
+
+      <form class="card auth-card" id="own-password-form" hidden novalidate>
+        <h2>Eigenes Passwort festlegen</h2>
+        <p class="muted small" id="own-password-text"></p>
+        <!-- für Passwort-Manager, damit sie das neue Passwort dem richtigen Konto zuordnen -->
+        <input name="username" type="text" autocomplete="username" hidden>
+        <label class="field">
+          <span class="field-label">Neues Passwort <span class="optional">(mind. 8 Zeichen)</span></span>
+          <input name="new" type="password" autocomplete="new-password" required>
+        </label>
+        <label class="field">
+          <span class="field-label">Noch einmal</span>
+          <input name="repeat" type="password" autocomplete="new-password" required>
+        </label>
+        <p class="form-error" data-error hidden></p>
+        <button class="btn btn-primary btn-block" type="submit">Passwort speichern</button>
+        <button class="btn btn-ghost btn-block" id="own-password-logout" type="button">Abmelden</button>
       </form>
 
       <div class="card auth-card" id="auth-failed" hidden>
@@ -152,7 +172,8 @@
         <div id="history"></div>
         <p class="empty" id="empty" hidden>
           Noch keine Einträge.<br>
-          <span data-word="emptyHint"></span>
+          <span data-word="emptyHint"></span><br><br>
+          Alte Schulden von früher? Einfach mit dem damaligen Datum eintragen.
         </p>
       </section>
     </main>
@@ -195,9 +216,15 @@
         </label>
 
         <label class="field">
-          <span class="field-label">Datum</span>
+          <span class="field-label">Datum <span class="optional">(auch in der Vergangenheit)</span></span>
           <input id="date" name="date" type="date" required>
         </label>
+
+        <div class="field">
+          <span class="field-label">Belege <span class="optional">(optional, z.&nbsp;B. Foto vom Kassenbon)</span></span>
+          <div class="photos" id="photo-list"></div>
+          <input id="photo-input" type="file" accept="image/*" multiple hidden>
+        </div>
 
         <p class="muted small" id="entry-info" hidden></p>
         <p class="form-error" data-error hidden></p>
@@ -220,6 +247,7 @@
         <p>Angemeldet als <strong id="me-name"></strong> <span class="muted">(<span id="me-username"></span>)</span></p>
         <button class="btn btn-secondary btn-small" id="logout" type="button">Abmelden</button>
       </div>
+      <p class="muted small" id="partner-status"></p>
 
       <details class="disclosure">
         <summary>Passwort ändern</summary>
@@ -238,21 +266,23 @@
       </details>
 
       <details class="disclosure">
-        <summary><span>Passwort von <span data-partner></span> zurücksetzen</span></summary>
+        <summary><span>Einmal-Passwort für <span data-partner></span> setzen</span></summary>
         <form class="disclosure-body" id="partner-password-form" novalidate>
           <p class="muted small">
-            Falls <span data-partner></span> das Passwort vergessen hat. Zur Bestätigung brauchst du dein eigenes Passwort.
+            Falls <span data-partner></span> das Passwort vergessen hat: Du setzt ein Einmal-Passwort,
+            und <span data-partner></span> legt beim nächsten Anmelden ein eigenes fest. Zur Bestätigung
+            brauchst du dein eigenes Passwort.
           </p>
           <label class="field">
             <span class="field-label">Dein Passwort</span>
             <input name="current" type="password" autocomplete="current-password" required>
           </label>
           <label class="field">
-            <span class="field-label">Neues Passwort für <span data-partner></span></span>
-            <input name="new" type="password" autocomplete="new-password" required>
+            <span class="field-label">Einmal-Passwort für <span data-partner></span></span>
+            <input name="new" type="text" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" required>
           </label>
           <p class="form-error" data-error hidden></p>
-          <button class="btn btn-primary btn-block" type="submit">Passwort setzen</button>
+          <button class="btn btn-primary btn-block" type="submit">Einmal-Passwort setzen</button>
         </form>
       </details>
 
@@ -274,6 +304,30 @@
       <h3 class="group-title">Gefahrenzone</h3>
       <button class="btn btn-danger btn-block" id="delete-all" type="button">Alle Einträge löschen</button>
     </div>
+  </dialog>
+
+  <!-- Zugangsdaten an die andere Person schicken -->
+  <dialog class="sheet" id="share-sheet" aria-labelledby="share-title">
+    <div class="sheet-head">
+      <span></span>
+      <h2 id="share-title">Zugang für <span id="share-name"></span></h2>
+      <button class="link-btn link-btn-strong" type="button" data-close>Fertig</button>
+    </div>
+    <div class="sheet-body">
+      <p class="muted small">
+        Schick <span class="share-name"></span> diese Angaben, z.&nbsp;B. per WhatsApp. Beim ersten Anmelden
+        legt <span class="share-name"></span> ein eigenes Passwort fest – das Einmal-Passwort gilt dann nicht mehr.
+      </p>
+      <pre class="share-text" id="share-text"></pre>
+      <button class="btn btn-primary btn-block" id="share-send" type="button">Senden …</button>
+      <button class="btn btn-secondary btn-block" id="share-copy" type="button">Text kopieren</button>
+    </div>
+  </dialog>
+
+  <!-- Beleg in groß -->
+  <dialog class="viewer" id="viewer" aria-label="Beleg">
+    <img id="viewer-img" alt="Beleg">
+    <button class="viewer-close" type="button" data-close aria-label="Schließen">×</button>
   </dialog>
 
   <div class="toast" id="toast" role="status" aria-live="polite" hidden>
