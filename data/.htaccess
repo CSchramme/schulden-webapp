@@ -1,0 +1,8 @@
+# Ersatz-Speicherort der Datenbank – niemals über das Web ausliefern.
+<IfModule mod_authz_core.c>
+  Require all denied
+</IfModule>
+<IfModule !mod_authz_core.c>
+  Order allow,deny
+  Deny from all
+</IfModule>

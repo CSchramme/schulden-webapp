@@ -1,0 +1,31 @@
+{
+  "name": "Schulden",
+  "short_name": "Schulden",
+  "description": "Gemeinsam im Blick behalten, wer wem wie viel schuldet – mit Fotos von Belegen.",
+  "lang": "de",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0f5f59",
+  "theme_color": "#0f5f59",
+  "categories": ["finance", "productivity"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    {
+      "name": "Neuer Eintrag",
+      "short_name": "Neu",
+      "url": "./?neu",
+      "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    }
+  ],
+  "screenshots": [
+    { "src": "screenshots/start.jpg", "sizes": "780x1688", "type": "image/jpeg", "form_factor": "narrow", "label": "Aktueller Stand und Verlauf" },
+    { "src": "screenshots/beleg.jpg", "sizes": "780x1688", "type": "image/jpeg", "form_factor": "narrow", "label": "Eintrag mit Foto vom Beleg" }
+  ]
+}

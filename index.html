@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Schulden</title>
+  <meta name="description" content="Gemeinsam im Blick behalten, wer wem wie viel schuldet.">
+
+  <!-- Home-Bildschirm / PWA -->
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icons/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="icons/icon-192.png" type="image/png" sizes="192x192">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <meta name="theme-color" content="#0f5f59">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Schulden">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <!-- Anmelden / Einrichten -->
+  <div class="auth" id="auth">
+    <div class="auth-inner">
+      <div class="auth-brand">
+        <img src="icons/favicon.svg" alt="" width="64" height="64">
+        <h1>Schulden</h1>
+      </div>
+
+      <p class="auth-status" id="auth-status">Lädt …</p>
+
+      <form class="card auth-card" id="login-form" hidden novalidate>
+        <h2>Anmelden</h2>
+        <label class="field">
+          <span class="field-label">Benutzername</span>
+          <input name="username" type="text" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" required>
+        </label>
+        <label class="field">
+          <span class="field-label">Passwort</span>
+          <input name="password" type="password" autocomplete="current-password" required>
+        </label>
+        <p class="form-error" data-error hidden></p>
+        <button class="btn btn-primary btn-block" type="submit">Anmelden</button>
+        <p class="muted small center">Du bleibst auf diesem Gerät angemeldet.</p>
+      </form>
+
+      <form class="card auth-card" id="setup-form" hidden novalidate>
+        <h2>Einrichten</h2>
+        <p class="muted small">
+          Lege einmalig zwei Konten an: eins für dich und eins für die Person, mit der du die Schulden hast.
+          Danach seht ihr beide dieselben Einträge.
+        </p>
+
+        <div class="field">
+          <span class="field-label" id="role-label">Wer hat die Schulden?</span>
+          <fieldset class="segmented" aria-labelledby="role-label">
+            <label><input type="radio" name="role" value="borrower" checked><span>Ich</span></label>
+            <label><input type="radio" name="role" value="lender"><span>Die andere Person</span></label>
+          </fieldset>
+        </div>
+
+        <h3 class="group-title">Dein Konto</h3>
+        <label class="field">
+          <span class="field-label">Dein Name</span>
+          <input name="me_name" type="text" maxlength="40" autocomplete="given-name" placeholder="z. B. Tim" required>
+        </label>
+        <label class="field">
+          <span class="field-label">Benutzername</span>
+          <input name="me_username" type="text" maxlength="30" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" required>
+        </label>
+        <label class="field">
+          <span class="field-label">Passwort <span class="optional">(mind. 8 Zeichen)</span></span>
+          <input name="me_password" type="password" autocomplete="new-password" required>
+        </label>
+
+        <h3 class="group-title">Konto für die andere Person</h3>
+        <label class="field">
+          <span class="field-label">Name</span>
+          <input name="partner_name" type="text" maxlength="40" autocomplete="off" placeholder="z. B. Papa" required>
+        </label>
+        <label class="field">
+          <span class="field-label">Benutzername</span>
+          <input name="partner_username" type="text" maxlength="30" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" required>
+        </label>
+        <label class="field">
+          <span class="field-label">Einmal-Passwort <span class="optional">(mind. 8 Zeichen)</span></span>
+          <input name="partner_password" type="text" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" required>
+          <span class="field-hint">Damit meldet sich die andere Person das erste Mal an und legt dann ein eigenes Passwort fest, das du nicht kennst.</span>
+        </label>
+
+        <p class="form-error" data-error hidden></p>
+        <button class="btn btn-primary btn-block" type="submit">Konten anlegen</button>
+      </form>
+
+      <form class="card auth-card" id="own-password-form" hidden novalidate>
+        <h2>Eigenes Passwort festlegen</h2>
+        <p class="muted small" id="own-password-text"></p>
+        <!-- für Passwort-Manager, damit sie das neue Passwort dem richtigen Konto zuordnen -->
+        <input name="username" type="text" autocomplete="username" hidden>
+        <label class="field">
+          <span class="field-label">Neues Passwort <span class="optional">(mind. 8 Zeichen)</span></span>
+          <input name="new" type="password" autocomplete="new-password" required>
+        </label>
+        <label class="field">
+          <span class="field-label">Noch einmal</span>
+          <input name="repeat" type="password" autocomplete="new-password" required>
+        </label>
+        <p class="form-error" data-error hidden></p>
+        <button class="btn btn-primary btn-block" type="submit">Passwort speichern</button>
+        <button class="btn btn-ghost btn-block" id="own-password-logout" type="button">Abmelden</button>
+      </form>
+
+      <div class="card auth-card" id="auth-failed" hidden>
+        <h2>Keine Verbindung</h2>
+        <p class="muted small" id="auth-failed-text"></p>
+        <button class="btn btn-primary btn-block" id="auth-retry" type="button">Nochmal versuchen</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Die eigentliche App -->
+  <div id="app" hidden>
+    <header class="top">
+      <div class="top-bar">
+        <h1 class="top-title">Schulden mit <span data-partner></span></h1>
+        <button class="icon-btn" id="open-settings" type="button" aria-label="Einstellungen">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1.08 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.6.85 1 1.51 1H21a2 2 0 1 1 0 4h-.09c-.66 0-1.25.4-1.51 1Z"/></svg>
+        </button>
+      </div>
+      <p class="balance-label" id="balance-label">Ihr seid quitt</p>
+      <p class="balance-amount" id="balance-amount">0,00&nbsp;€</p>
+      <p class="balance-totals" id="balance-totals"></p>
+    </header>
+
+    <main class="content">
+      <div class="actions">
+        <button class="action action-borrow" type="button" data-add="borrow">
+          <span class="action-icon" aria-hidden="true">+</span>
+          <span class="action-text">
+            <span class="action-title" data-word="borrowTitle"></span>
+            <span class="action-sub" data-word="borrowSub"></span>
+          </span>
+        </button>
+        <button class="action action-repay" type="button" data-add="repay">
+          <span class="action-icon" aria-hidden="true">−</span>
+          <span class="action-text">
+            <span class="action-title" data-word="repayTitle"></span>
+            <span class="action-sub" data-word="repaySub"></span>
+          </span>
+        </button>
+      </div>
+
+      <p class="offline-banner" id="offline-banner" hidden>
+        Offline – du siehst den letzten bekannten Stand. Neue Einträge gehen erst wieder mit Internet.
+      </p>
+
+      <section class="card install-hint" id="install-hint" hidden>
+        <div class="install-hint-body">
+          <strong>Als App installieren</strong>
+          <p id="install-hint-text"></p>
+        </div>
+        <div class="install-hint-actions">
+          <button class="btn btn-primary btn-small" id="install-btn" type="button" hidden>Installieren</button>
+          <button class="btn btn-ghost btn-small" id="install-dismiss" type="button">Später</button>
+        </div>
+      </section>
+
+      <section aria-labelledby="history-title">
+        <h2 class="section-title" id="history-title">Verlauf</h2>
+        <div id="history"></div>
+        <p class="empty" id="empty" hidden>
+          Noch keine Einträge.<br>
+          <span data-word="emptyHint"></span><br><br>
+          Alte Schulden von früher? Einfach mit dem damaligen Datum eintragen.
+        </p>
+      </section>
+    </main>
+  </div>
+
+  <!-- Eintrag hinzufügen / bearbeiten -->
+  <dialog class="sheet" id="entry-sheet" aria-labelledby="entry-title">
+    <form id="entry-form" novalidate>
+      <div class="sheet-head">
+        <button class="link-btn" type="button" data-close>Abbrechen</button>
+        <h2 id="entry-title">Neuer Eintrag</h2>
+        <button class="link-btn link-btn-strong" type="submit">Sichern</button>
+      </div>
+      <div class="sheet-body">
+        <fieldset class="segmented">
+          <legend class="visually-hidden">Art</legend>
+          <label>
+            <input type="radio" name="dir" value="borrow" checked>
+            <span data-word="borrow"></span>
+          </label>
+          <label>
+            <input type="radio" name="dir" value="repay">
+            <span data-word="repay"></span>
+          </label>
+        </fieldset>
+        <p class="dir-hint" id="dir-hint"></p>
+
+        <label class="field">
+          <span class="field-label">Betrag</span>
+          <span class="amount-input">
+            <input id="amount" name="amount" type="text" inputmode="decimal" autocomplete="off" placeholder="0,00" required>
+            <span class="amount-suffix">€</span>
+          </span>
+          <span class="field-error" id="amount-error" hidden>Bitte einen gültigen Betrag eingeben, z.&nbsp;B. 12,50</span>
+        </label>
+
+        <label class="field">
+          <span class="field-label">Wofür? <span class="optional">(optional)</span></span>
+          <input id="note" name="note" type="text" maxlength="120" autocomplete="off" enterkeyhint="done" placeholder="z. B. Tanken, Handyrechnung">
+        </label>
+
+        <label class="field">
+          <span class="field-label">Datum <span class="optional">(auch in der Vergangenheit)</span></span>
+          <input id="date" name="date" type="date" required>
+        </label>
+
+        <div class="field">
+          <span class="field-label">Belege <span class="optional">(optional, z.&nbsp;B. Foto vom Kassenbon)</span></span>
+          <div class="photos" id="photo-list"></div>
+          <input id="photo-input" type="file" accept="image/*" multiple hidden>
+        </div>
+
+        <p class="muted small" id="entry-info" hidden></p>
+        <p class="form-error" data-error hidden></p>
+        <button class="btn btn-primary btn-block" type="submit">Sichern</button>
+        <button class="btn btn-danger btn-block" id="delete-entry" type="button" hidden>Eintrag löschen</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Einstellungen -->
+  <dialog class="sheet" id="settings-sheet" aria-labelledby="settings-title">
+    <div class="sheet-head">
+      <span></span>
+      <h2 id="settings-title">Einstellungen</h2>
+      <button class="link-btn link-btn-strong" type="button" data-close>Fertig</button>
+    </div>
+    <div class="sheet-body">
+      <h3 class="group-title">Konto</h3>
+      <div class="account-row">
+        <p>Angemeldet als <strong id="me-name"></strong> <span class="muted">(<span id="me-username"></span>)</span></p>
+        <button class="btn btn-secondary btn-small" id="logout" type="button">Abmelden</button>
+      </div>
+      <p class="muted small" id="partner-status"></p>
+
+      <details class="disclosure">
+        <summary>Passwort ändern</summary>
+        <form class="disclosure-body" id="password-form" novalidate>
+          <label class="field">
+            <span class="field-label">Aktuelles Passwort</span>
+            <input name="current" type="password" autocomplete="current-password" required>
+          </label>
+          <label class="field">
+            <span class="field-label">Neues Passwort <span class="optional">(mind. 8 Zeichen)</span></span>
+            <input name="new" type="password" autocomplete="new-password" required>
+          </label>
+          <p class="form-error" data-error hidden></p>
+          <button class="btn btn-primary btn-block" type="submit">Passwort ändern</button>
+        </form>
+      </details>
+
+      <details class="disclosure">
+        <summary><span>Einmal-Passwort für <span data-partner></span> setzen</span></summary>
+        <form class="disclosure-body" id="partner-password-form" novalidate>
+          <p class="muted small">
+            Falls <span data-partner></span> das Passwort vergessen hat: Du setzt ein Einmal-Passwort,
+            und <span data-partner></span> legt beim nächsten Anmelden ein eigenes fest. Zur Bestätigung
+            brauchst du dein eigenes Passwort.
+          </p>
+          <label class="field">
+            <span class="field-label">Dein Passwort</span>
+            <input name="current" type="password" autocomplete="current-password" required>
+          </label>
+          <label class="field">
+            <span class="field-label">Einmal-Passwort für <span data-partner></span></span>
+            <input name="new" type="text" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" required>
+          </label>
+          <p class="form-error" data-error hidden></p>
+          <button class="btn btn-primary btn-block" type="submit">Einmal-Passwort setzen</button>
+        </form>
+      </details>
+
+      <h3 class="group-title">Benachrichtigungen</h3>
+      <p class="muted small" id="ntfy-status"></p>
+      <details class="disclosure" id="ntfy-details">
+        <summary><span id="ntfy-summary">Einrichten</span></summary>
+        <form class="disclosure-body" id="ntfy-form" novalidate>
+          <ol class="steps">
+            <li>
+              Installiere die kostenlose App <b>ntfy</b>:
+              <a href="https://play.google.com/store/apps/details?id=io.heckel.ntfy" target="_blank" rel="noopener">Android</a> ·
+              <a href="https://apps.apple.com/app/ntfy/id1625396347" target="_blank" rel="noopener">iPhone</a>
+            </li>
+            <li>Tippe in ntfy auf <b>+</b> und gib diesen Kanal ein:</li>
+          </ol>
+          <div class="field">
+            <span class="field-label" id="ntfy-topic-label">Kanal</span>
+            <div class="input-row">
+              <input name="topic" type="text" maxlength="64" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" aria-labelledby="ntfy-topic-label">
+              <button class="btn btn-secondary btn-small" id="ntfy-copy" type="button">Kopieren</button>
+            </div>
+            <span class="field-hint">Der Name ist zufällig, damit niemand sonst mitlesen kann. Behalte ihn für dich.</span>
+          </div>
+          <ol class="steps" start="3">
+            <li>Hier speichern und eine Test-Nachricht schicken.</li>
+          </ol>
+          <details class="advanced">
+            <summary>Eigener ntfy-Server (optional)</summary>
+            <div class="stack">
+              <label class="field">
+                <span class="field-label">Server</span>
+                <input name="server" type="url" maxlength="200" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="https://ntfy.sh">
+              </label>
+              <label class="field">
+                <span class="field-label">Zugangs-Token</span>
+                <input name="token" type="password" maxlength="200" autocomplete="off" placeholder="nur bei geschützten Kanälen">
+              </label>
+            </div>
+          </details>
+          <p class="form-error" data-error hidden></p>
+          <p class="form-success" data-success hidden></p>
+          <button class="btn btn-primary btn-block" type="submit">Speichern</button>
+          <button class="btn btn-secondary btn-block" id="ntfy-test" type="button" hidden>Test-Nachricht senden</button>
+          <button class="btn btn-ghost btn-block" id="ntfy-off" type="button" hidden>Benachrichtigungen ausschalten</button>
+        </form>
+      </details>
+
+      <h3 class="group-title">Daten</h3>
+      <p class="muted small" id="storage-text"></p>
+      <div class="stack">
+        <button class="btn btn-secondary btn-block" id="export-json" type="button">Backup als Datei speichern</button>
+        <button class="btn btn-secondary btn-block" id="import-json" type="button">Backup einspielen</button>
+        <button class="btn btn-secondary btn-block" id="export-csv" type="button">Als Tabelle exportieren (CSV)</button>
+        <input id="import-file" type="file" accept="application/json,.json" hidden>
+      </div>
+
+      <div class="group" id="install-section">
+        <h3 class="group-title">Zum Home-Bildschirm</h3>
+        <p class="muted small" id="install-section-text"></p>
+        <button class="btn btn-primary btn-block" id="install-btn-settings" type="button" hidden>App installieren</button>
+      </div>
+
+      <h3 class="group-title">Gefahrenzone</h3>
+      <button class="btn btn-danger btn-block" id="delete-all" type="button">Alle Einträge löschen</button>
+    </div>
+  </dialog>
+
+  <!-- Zugangsdaten an die andere Person schicken -->
+  <dialog class="sheet" id="share-sheet" aria-labelledby="share-title">
+    <div class="sheet-head">
+      <span></span>
+      <h2 id="share-title">Zugang für <span id="share-name"></span></h2>
+      <button class="link-btn link-btn-strong" type="button" data-close>Fertig</button>
+    </div>
+    <div class="sheet-body">
+      <p class="muted small">
+        Schick <span class="share-name"></span> diese Angaben, z.&nbsp;B. per WhatsApp. Beim ersten Anmelden
+        legt <span class="share-name"></span> ein eigenes Passwort fest – das Einmal-Passwort gilt dann nicht mehr.
+      </p>
+      <pre class="share-text" id="share-text"></pre>
+      <button class="btn btn-primary btn-block" id="share-send" type="button">Senden …</button>
+      <button class="btn btn-secondary btn-block" id="share-copy" type="button">Text kopieren</button>
+    </div>
+  </dialog>
+
+  <!-- Beleg in groß -->
+  <dialog class="viewer" id="viewer" aria-label="Beleg">
+    <img id="viewer-img" alt="Beleg">
+    <button class="viewer-close" type="button" data-close aria-label="Schließen">×</button>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden>
+    <span id="toast-text"></span>
+    <button class="toast-action" id="toast-action" type="button" hidden></button>
+  </div>
+</body>
+</html>
