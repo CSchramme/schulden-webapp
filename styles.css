@@ -156,6 +156,58 @@ button {
   font-size: 14px;
 }
 
+.form-success {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--repay-soft);
+  color: var(--repay);
+  font-size: 14px;
+}
+
+.steps {
+  margin: 0;
+  padding-left: 22px;
+  font-size: 15px;
+}
+
+.steps li + li {
+  margin-top: 6px;
+}
+
+.steps a {
+  color: var(--brand-strong);
+  font-weight: 600;
+}
+
+.input-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.field .input-row input {
+  flex: 1 1 100%;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 15px;
+}
+
+.input-row .btn {
+  min-height: 48px;
+  background: var(--surface);
+}
+
+.advanced summary {
+  font-size: 14px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.advanced[open] summary {
+  margin-bottom: 12px;
+}
+
 /* ---------- Kopfbereich mit Kontostand ---------- */
 
 .top {
@@ -543,7 +595,8 @@ button {
     color: #fff;
   }
 
-  .link-btn {
+  .link-btn,
+  .steps a {
     color: #5eead4;
   }
 }
@@ -917,7 +970,7 @@ dialog.viewer img {
   background: var(--surface-2);
 }
 
-.disclosure summary {
+.disclosure > summary {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -928,11 +981,11 @@ dialog.viewer img {
   list-style: none;
 }
 
-.disclosure summary::-webkit-details-marker {
+.disclosure > summary::-webkit-details-marker {
   display: none;
 }
 
-.disclosure summary::after {
+.disclosure > summary::after {
   content: "›";
   font-size: 22px;
   line-height: 1;
@@ -940,8 +993,12 @@ dialog.viewer img {
   transition: transform 0.15s ease;
 }
 
-.disclosure[open] summary::after {
+.disclosure[open] > summary::after {
   transform: rotate(90deg);
+}
+
+.disclosure .btn-secondary {
+  background: var(--surface);
 }
 
 .disclosure-body {

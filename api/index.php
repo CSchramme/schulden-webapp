@@ -50,6 +50,12 @@ try {
         case 'photo-delete':
             action_photo_delete();
             break;
+        case 'ntfy-save':
+            action_ntfy_save();
+            break;
+        case 'ntfy-test':
+            action_ntfy_test();
+            break;
         default:
             fail(404, 'Unbekannte Aktion.');
     }
@@ -174,18 +180,27 @@ function action_save(): void
 
     $db = db();
     $now = now_ms();
-    $stmt = $db->prepare('SELECT id FROM entries WHERE id = ?');
+    $stmt = $db->prepare('SELECT dir, cents, entry_date, note, deleted_at FROM entries WHERE id = ?');
     $stmt->execute([$entry['id']]);
-    if ($stmt->fetchColumn() !== false) {
+    $before = $stmt->fetch();
+    if ($before !== false) {
+        $unchanged = $before['deleted_at'] === null && $before['dir'] === $entry['dir']
+            && (int) $before['cents'] === $entry['cents'] && $before['entry_date'] === $entry['date']
+            && $before['note'] === $entry['note'];
+        if ($unchanged) {
+            respond(state($user));
+        }
         $db->prepare(
             'UPDATE entries SET dir = ?, cents = ?, entry_date = ?, note = ?, updated_by = ?, updated_at = ?,
                     deleted_by = NULL, deleted_at = NULL
               WHERE id = ?'
         )->execute([$entry['dir'], $entry['cents'], $entry['date'], $entry['note'], $user['username'], $now, $entry['id']]);
+        notify_partner($user, 'updated', $entry, ['before' => $before]);
     } else {
         $db->prepare(
             'INSERT INTO entries (id, dir, cents, entry_date, note, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
         )->execute([$entry['id'], $entry['dir'], $entry['cents'], $entry['date'], $entry['note'], $user['username'], $now]);
+        notify_partner($user, 'created', $entry);
     }
     respond(state($user));
 }
@@ -196,8 +211,15 @@ function action_delete(): void
     $user = require_user();
     $data = read_json();
     $id = is_string($data['id'] ?? null) ? $data['id'] : '';
-    db()->prepare('UPDATE entries SET deleted_by = ?, deleted_at = ? WHERE id = ? AND deleted_at IS NULL')
-        ->execute([$user['username'], now_ms(), $id]);
+    $db = db();
+    $stmt = $db->prepare('SELECT dir, cents, entry_date AS date, note FROM entries WHERE id = ? AND deleted_at IS NULL');
+    $stmt->execute([$id]);
+    $entry = $stmt->fetch();
+    if ($entry !== false) {
+        $db->prepare('UPDATE entries SET deleted_by = ?, deleted_at = ? WHERE id = ?')
+            ->execute([$user['username'], now_ms(), $id]);
+        notify_partner($user, 'deleted', $entry);
+    }
     respond(state($user));
 }
 
@@ -207,14 +229,19 @@ function action_restore(): void
     $data = read_json();
     $ids = is_array($data['ids'] ?? null) ? $data['ids'] : [];
     $db = db();
-    $stmt = $db->prepare('UPDATE entries SET deleted_by = NULL, deleted_at = NULL WHERE id = ?');
+    $stmt = $db->prepare('UPDATE entries SET deleted_by = NULL, deleted_at = NULL WHERE id = ? AND deleted_at IS NOT NULL');
+    $restored = 0;
     $db->beginTransaction();
     foreach ($ids as $id) {
         if (is_string($id)) {
             $stmt->execute([$id]);
+            $restored += $stmt->rowCount();
         }
     }
     $db->commit();
+    if ($restored > 0) {
+        notify_partner($user, 'restored', null, ['count' => $restored]);
+    }
     respond(state($user));
 }
 
@@ -226,6 +253,9 @@ function action_delete_all(): void
     $ids = $db->query('SELECT id FROM entries WHERE deleted_at IS NULL')->fetchAll(PDO::FETCH_COLUMN);
     $db->prepare('UPDATE entries SET deleted_by = ?, deleted_at = ? WHERE deleted_at IS NULL')
         ->execute([$user['username'], now_ms()]);
+    if ($ids) {
+        notify_partner($user, 'deleted-all', null, ['count' => count($ids)]);
+    }
     respond(state($user, ['deletedIds' => $ids]));
 }
 
@@ -271,6 +301,9 @@ function action_import(): void
     }
     $db->commit();
 
+    if ($added + $restored > 0) {
+        notify_partner($user, 'imported', null, ['count' => $added + $restored]);
+    }
     respond(state($user, ['added' => $added, 'restored' => $restored]));
 }
 
@@ -301,6 +334,9 @@ function action_password(): void
     $db->prepare('DELETE FROM sessions WHERE username = ? AND token_hash <> ?')
         ->execute([$user['username'], session_token_hash()]);
     $user['must_change'] = 0;
+    if ($pending) {
+        notify_partner($user, 'joined');
+    }
     respond(state($user));
 }
 
@@ -434,4 +470,68 @@ function action_photo_delete(): void
         }
     }
     respond(state($user));
+}
+
+/**
+ * Eigene ntfy-Einstellungen. Leerer Kanal schaltet die Benachrichtigungen aus.
+ * Ein leeres Token-Feld lässt einen gespeicherten Token unverändert (außer clearToken).
+ */
+function action_ntfy_save(): void
+{
+    $user = require_user();
+    $data = read_json();
+    $topic = is_string($data['topic'] ?? null) ? trim($data['topic']) : '';
+    $server = is_string($data['server'] ?? null) ? rtrim(trim($data['server']), '/') : '';
+    $token = is_string($data['token'] ?? null) ? trim($data['token']) : '';
+
+    if ($topic === '') {
+        db()->prepare("UPDATE users SET ntfy_topic = '', ntfy_server = '', ntfy_token = '' WHERE username = ?")
+            ->execute([$user['username']]);
+        respond(state($user));
+    }
+    if (!preg_match('/^[A-Za-z0-9_-]{1,64}$/', $topic)) {
+        fail(422, 'Der Kanal darf nur Buchstaben (ohne Umlaute), Ziffern, - und _ enthalten (höchstens 64 Zeichen).');
+    }
+    if ($server === NTFY_DEFAULT_SERVER) {
+        $server = '';
+    }
+    if ($server !== '' && (strlen($server) > 200 || !preg_match('~^https?://[^\s/?#]+(/[^\s?#]*)?$~i', $server))) {
+        fail(422, 'Die Server-Adresse muss mit https:// beginnen, z. B. https://ntfy.example.de');
+    }
+    if (strlen($token) > 200 || !preg_match('/^[\x21-\x7e]*$/', $token)) {
+        fail(422, 'Der Zugangs-Token ist ungültig.');
+    }
+
+    // Ein Token gehört zu seinem Server: bei einem Serverwechsel nie an den neuen Server schicken.
+    $serverChanged = find_user($user['username'])['ntfy_server'] !== $server;
+    if ($token !== '' || $serverChanged || !empty($data['clearToken'])) {
+        db()->prepare('UPDATE users SET ntfy_topic = ?, ntfy_server = ?, ntfy_token = ? WHERE username = ?')
+            ->execute([$topic, $server, $token, $user['username']]);
+    } else {
+        db()->prepare('UPDATE users SET ntfy_topic = ?, ntfy_server = ? WHERE username = ?')
+            ->execute([$topic, $server, $user['username']]);
+    }
+    respond(state($user));
+}
+
+/** Test-Nachricht an den eigenen Kanal, mit Rückmeldung, ob es geklappt hat. */
+function action_ntfy_test(): void
+{
+    $user = require_user();
+    read_json();
+    $own = find_user($user['username']);
+    if ($own['ntfy_topic'] === '') {
+        fail(422, 'Bitte zuerst einen Kanal speichern.');
+    }
+    $partner = partner_of($user['username']);
+    $other = $partner === null ? 'die andere Person' : $partner['name'];
+    $error = ntfy_send(
+        $own,
+        'Test von der Schulden-App',
+        "Klappt! Ab jetzt bekommst du hier Bescheid, wenn $other etwas einträgt, ändert oder löscht."
+    );
+    if ($error !== null) {
+        fail(502, "Die Test-Nachricht ging nicht raus: $error.");
+    }
+    respond(['ok' => true]);
 }

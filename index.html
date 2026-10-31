@@ -286,6 +286,51 @@
         </form>
       </details>
 
+      <h3 class="group-title">Benachrichtigungen</h3>
+      <p class="muted small" id="ntfy-status"></p>
+      <details class="disclosure" id="ntfy-details">
+        <summary><span id="ntfy-summary">Einrichten</span></summary>
+        <form class="disclosure-body" id="ntfy-form" novalidate>
+          <ol class="steps">
+            <li>
+              Installiere die kostenlose App <b>ntfy</b>:
+              <a href="https://play.google.com/store/apps/details?id=io.heckel.ntfy" target="_blank" rel="noopener">Android</a> ·
+              <a href="https://apps.apple.com/app/ntfy/id1625396347" target="_blank" rel="noopener">iPhone</a>
+            </li>
+            <li>Tippe in ntfy auf <b>+</b> und gib diesen Kanal ein:</li>
+          </ol>
+          <div class="field">
+            <span class="field-label" id="ntfy-topic-label">Kanal</span>
+            <div class="input-row">
+              <input name="topic" type="text" maxlength="64" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" aria-labelledby="ntfy-topic-label">
+              <button class="btn btn-secondary btn-small" id="ntfy-copy" type="button">Kopieren</button>
+            </div>
+            <span class="field-hint">Der Name ist zufällig, damit niemand sonst mitlesen kann. Behalte ihn für dich.</span>
+          </div>
+          <ol class="steps" start="3">
+            <li>Hier speichern und eine Test-Nachricht schicken.</li>
+          </ol>
+          <details class="advanced">
+            <summary>Eigener ntfy-Server (optional)</summary>
+            <div class="stack">
+              <label class="field">
+                <span class="field-label">Server</span>
+                <input name="server" type="url" maxlength="200" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="https://ntfy.sh">
+              </label>
+              <label class="field">
+                <span class="field-label">Zugangs-Token</span>
+                <input name="token" type="password" maxlength="200" autocomplete="off" placeholder="nur bei geschützten Kanälen">
+              </label>
+            </div>
+          </details>
+          <p class="form-error" data-error hidden></p>
+          <p class="form-success" data-success hidden></p>
+          <button class="btn btn-primary btn-block" type="submit">Speichern</button>
+          <button class="btn btn-secondary btn-block" id="ntfy-test" type="button" hidden>Test-Nachricht senden</button>
+          <button class="btn btn-ghost btn-block" id="ntfy-off" type="button" hidden>Benachrichtigungen ausschalten</button>
+        </form>
+      </details>
+
       <h3 class="group-title">Daten</h3>
       <p class="muted small" id="storage-text"></p>
       <div class="stack">

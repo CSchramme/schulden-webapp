@@ -422,6 +422,12 @@ function setFormError(form, message) {
   el.hidden = !message;
 }
 
+function setFormSuccess(form, message) {
+  const el = form.querySelector('[data-success]');
+  el.textContent = message || '';
+  el.hidden = !message;
+}
+
 /** Sperrt die Buttons eines Formulars, solange die Anfrage läuft. */
 async function whileBusy(form, task) {
   const buttons = form.querySelectorAll('button');
@@ -856,6 +862,8 @@ $('#open-settings').addEventListener('click', () => {
     setFormError(form, '');
     form.closest('details').open = false;
   }
+  $('#ntfy-details').open = false;
+  fillNtfyForm();
   updateInstallUI();
   hideToast();
   settingsSheet.showModal();
@@ -890,6 +898,111 @@ partnerPasswordForm.addEventListener('submit', async (event) => {
   }
   settingsSheet.close();
   openShareSheet(partner, oneTimePassword);
+});
+
+// ---------- Benachrichtigungen (ntfy) ----------
+
+const ntfyForm = $('#ntfy-form');
+const ntfyConfig = () => me?.ntfy || { topic: '', server: '', hasToken: false };
+
+/** Zufälliger Kanalname – bei ntfy.sh kann jeder mitlesen, der den Namen kennt. */
+function randomTopic() {
+  const random = Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(36).padStart(2, '0'))
+    .join('')
+    .slice(0, 12);
+  return `schulden-${me.username.replace(/[^A-Za-z0-9_-]/g, '-')}-${random}`;
+}
+
+function updateNtfyUI() {
+  const config = ntfyConfig();
+  const active = Boolean(config.topic);
+  const p = partnerName();
+  const partnerText = !partner
+    ? ''
+    : partner.notifications
+      ? ` ${p} bekommt auch Benachrichtigungen.`
+      : ` ${p} hat sie noch nicht eingeschaltet.`;
+  $('#ntfy-status').textContent =
+    (active
+      ? `Eingeschaltet: Du bekommst über ntfy eine Push-Nachricht, wenn ${p} etwas einträgt, ändert oder löscht.`
+      : `Bekomme eine Push-Nachricht aufs Handy, wenn ${p} etwas einträgt, ändert oder löscht – über die kostenlose App ntfy.`) +
+    partnerText;
+  $('#ntfy-summary').textContent = active ? 'Einstellungen und Test' : 'Einrichten';
+  $('#ntfy-test').hidden = !active;
+  $('#ntfy-off').hidden = !active;
+  ntfyForm.elements.token.placeholder = config.hasToken ? 'gespeichert – leer lassen zum Behalten' : 'nur bei geschützten Kanälen';
+}
+
+function fillNtfyForm() {
+  const config = ntfyConfig();
+  const f = ntfyForm.elements;
+  f.topic.value = config.topic || randomTopic();
+  f.server.value = config.server || '';
+  f.token.value = '';
+  ntfyForm.querySelector('.advanced').open = Boolean(config.server || config.hasToken);
+  $('#ntfy-copy').textContent = 'Kopieren';
+  setFormError(ntfyForm, '');
+  setFormSuccess(ntfyForm, '');
+  updateNtfyUI();
+}
+
+function saveNtfy() {
+  const f = ntfyForm.elements;
+  return send('ntfy-save', { topic: f.topic.value, server: f.server.value, token: f.token.value });
+}
+
+ntfyForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  setFormError(ntfyForm, '');
+  setFormSuccess(ntfyForm, '');
+  try {
+    await whileBusy(ntfyForm, saveNtfy);
+  } catch (err) {
+    if (err.status !== 401) setFormError(ntfyForm, err.message);
+    return;
+  }
+  ntfyForm.elements.token.value = '';
+  updateNtfyUI();
+  setFormSuccess(ntfyForm, 'Gespeichert. Schick jetzt eine Test-Nachricht, um zu prüfen, ob sie ankommt.');
+});
+
+$('#ntfy-test').addEventListener('click', async () => {
+  setFormError(ntfyForm, '');
+  setFormSuccess(ntfyForm, '');
+  try {
+    // Erst den aktuellen Stand des Formulars speichern, damit der Test an den richtigen Kanal geht.
+    await whileBusy(ntfyForm, async () => {
+      await saveNtfy();
+      await api('ntfy-test', {});
+    });
+  } catch (err) {
+    if (err.status !== 401) setFormError(ntfyForm, err.message);
+    return;
+  }
+  ntfyForm.elements.token.value = '';
+  updateNtfyUI();
+  setFormSuccess(ntfyForm, 'Test-Nachricht ist raus. Kommt sie nicht an: Ist der Kanal in der ntfy-App genau so eingetragen?');
+});
+
+$('#ntfy-off').addEventListener('click', async () => {
+  setFormError(ntfyForm, '');
+  try {
+    await whileBusy(ntfyForm, () => send('ntfy-save', { topic: '' }));
+  } catch (err) {
+    if (err.status !== 401) setFormError(ntfyForm, err.message);
+    return;
+  }
+  fillNtfyForm();
+  setFormSuccess(ntfyForm, 'Benachrichtigungen sind aus. Den Kanal kannst du in der ntfy-App wieder entfernen.');
+});
+
+$('#ntfy-copy').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(ntfyForm.elements.topic.value);
+    $('#ntfy-copy').textContent = 'Kopiert ✓';
+  } catch {
+    ntfyForm.elements.topic.select();
+  }
 });
 
 // ---------- Zugangsdaten an die andere Person schicken ----------

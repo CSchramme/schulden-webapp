@@ -1,7 +1,7 @@
 'use strict';
 
 // Bei größeren Änderungen hochzählen, dann wird der alte Cache aufgeräumt.
-const CACHE = 'schulden-v3';
+const CACHE = 'schulden-v4';
 
 const ASSETS = [
   './',

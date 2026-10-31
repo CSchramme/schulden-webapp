@@ -12,9 +12,10 @@ const SESSION_SECONDS = 365 * 24 * 3600;
 const MAX_CENTS = 10000000000; // 100 Mio. €
 const LOGIN_WINDOW_SECONDS = 15 * 60;
 const LOGIN_MAX_FAILURES = 8;
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const MAX_PHOTOS_PER_ENTRY = 6;
 const MAX_PHOTO_BYTES = 8 * 1024 * 1024;
+const NTFY_DEFAULT_SERVER = 'https://ntfy.sh';
 
 // ---------- Antworten und Anfragen ----------
 
@@ -25,6 +26,7 @@ function respond(array $data, int $status = 200): void
     header('Cache-Control: no-store');
     header('X-Content-Type-Options: nosniff');
     echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+    send_queued_notifications();
     exit;
 }
 
@@ -216,6 +218,19 @@ function migrate(PDO $pdo): void
             )' . $suffix
         );
     }
+    if ($version < 3) {
+        // Benachrichtigungen per ntfy, jede Person mit eigenem Kanal.
+        $columns = [
+            'ntfy_server' => 'VARCHAR(200)',
+            'ntfy_topic' => 'VARCHAR(64)',
+            'ntfy_token' => 'VARCHAR(200)',
+        ];
+        foreach ($columns as $column => $type) {
+            if (!column_exists($pdo, 'users', $column)) {
+                $pdo->exec("ALTER TABLE users ADD COLUMN $column $type NOT NULL DEFAULT ''");
+            }
+        }
+    }
 
     $pdo->prepare("UPDATE meta SET v = ? WHERE k = 'schema'")->execute([(string) SCHEMA_VERSION]);
     try {
@@ -370,9 +385,21 @@ function require_user(bool $allowPendingPassword = false): array
 
 function find_user(string $username): ?array
 {
-    $stmt = db()->prepare('SELECT username, name, role, must_change, password_hash FROM users WHERE username = ?');
+    $stmt = db()->prepare(
+        'SELECT username, name, role, must_change, password_hash, ntfy_server, ntfy_topic, ntfy_token
+           FROM users WHERE username = ?'
+    );
     $stmt->execute([$username]);
     return $stmt->fetch() ?: null;
+}
+
+/** Die jeweils andere Person (es gibt genau zwei Konten). */
+function partner_of(string $username): ?array
+{
+    $stmt = db()->prepare('SELECT username FROM users WHERE username <> ?');
+    $stmt->execute([$username]);
+    $other = $stmt->fetchColumn();
+    return $other === false ? null : find_user($other);
 }
 
 function user_count(): int
@@ -492,9 +519,8 @@ function load_entries(): array
 /** Alles, was die App nach dem Anmelden braucht. */
 function state(array $user, array $extra = []): array
 {
-    $stmt = db()->prepare('SELECT username, name, role, must_change FROM users WHERE username <> ?');
-    $stmt->execute([$user['username']]);
-    $partner = $stmt->fetch() ?: null;
+    $own = find_user($user['username']);
+    $partner = partner_of($user['username']);
     $pending = (bool) $user['must_change'];
 
     return array_merge([
@@ -504,12 +530,19 @@ function state(array $user, array $extra = []): array
             'name' => $user['name'],
             'role' => $user['role'],
             'mustChangePassword' => $pending,
+            // Der Token wird nie zurückgegeben, nur ob einer hinterlegt ist.
+            'ntfy' => [
+                'server' => $own['ntfy_server'],
+                'topic' => $own['ntfy_topic'],
+                'hasToken' => $own['ntfy_token'] !== '',
+            ],
         ],
         'partner' => $partner === null ? null : [
             'username' => $partner['username'],
             'name' => $partner['name'],
             'role' => $partner['role'],
             'passwordPending' => (bool) $partner['must_change'],
+            'notifications' => $partner['ntfy_topic'] !== '',
         ],
         // Mit Einmal-Passwort gibt es erst nach dem Festlegen des eigenen Passworts Daten.
         'entries' => $pending ? [] : load_entries(),
@@ -528,4 +561,189 @@ function find_entry(string $id): ?array
 function valid_id($id): bool
 {
     return is_string($id) && preg_match('/^[A-Za-z0-9_-]{6,64}$/', $id) === 1;
+}
+
+// ---------- Benachrichtigungen (ntfy) ----------
+
+function app_url(): string
+{
+    $host = (string) ($_SERVER['HTTP_HOST'] ?? 'localhost');
+    return (is_https() ? 'https://' : 'http://') . $host . base_path();
+}
+
+function euro_text(int $cents): string
+{
+    return number_format($cents / 100, 2, ',', '.') . ' €';
+}
+
+/** Art des Eintrags aus Sicht der Person mit dieser Rolle. */
+function dir_label(string $dir, string $role): string
+{
+    if ($role === 'lender') {
+        return $dir === 'borrow' ? 'Verliehen' : 'Zurückbekommen';
+    }
+    return $dir === 'borrow' ? 'Geliehen' : 'Zurückgezahlt';
+}
+
+/** Aktueller Stand aus Sicht von $recipient, $otherName ist die andere Person. */
+function balance_text(array $recipient, string $otherName): string
+{
+    $balance = (int) db()->query(
+        "SELECT COALESCE(SUM(CASE WHEN dir = 'borrow' THEN cents ELSE -cents END), 0) FROM entries WHERE deleted_at IS NULL"
+    )->fetchColumn();
+    if ($balance === 0) {
+        return 'Ihr seid quitt';
+    }
+    // Positiver Stand: die Person mit der Rolle "borrower" hat Schulden.
+    $recipientOwes = ($recipient['role'] === 'borrower') === ($balance > 0);
+    return $recipientOwes
+        ? "Du schuldest $otherName " . euro_text(abs($balance))
+        : "$otherName schuldet dir " . euro_text(abs($balance));
+}
+
+function entry_summary(array $entry, string $role): string
+{
+    $text = dir_label($entry['dir'], $role) . ': ' . euro_text((int) $entry['cents']);
+    if ($entry['note'] !== '') {
+        $text .= ' · ' . $entry['note'];
+    }
+    if ($entry['date'] !== date('Y-m-d')) {
+        [$y, $m, $d] = explode('-', $entry['date']);
+        $text .= " (vom $d.$m.$y)";
+    }
+    return $text;
+}
+
+/**
+ * Der anderen Person Bescheid geben, wenn $actor etwas geändert hat.
+ * $event: created, updated, deleted, restored, deleted-all, imported, joined
+ */
+function notify_partner(array $actor, string $event, ?array $entry = null, array $details = []): void
+{
+    $recipient = partner_of($actor['username']);
+    if ($recipient === null || $recipient['ntfy_topic'] === '') {
+        return;
+    }
+    $name = $actor['name'];
+    $role = $recipient['role'];
+    $count = (int) ($details['count'] ?? 0);
+    $lines = [];
+
+    switch ($event) {
+        case 'created':
+            $title = "$name hat etwas eingetragen";
+            $lines[] = entry_summary($entry, $role);
+            break;
+        case 'updated':
+            $title = "$name hat einen Eintrag geändert";
+            $line = entry_summary($entry, $role);
+            if (isset($details['before']) && (int) $details['before']['cents'] !== (int) $entry['cents']) {
+                $line .= ', vorher ' . euro_text((int) $details['before']['cents']);
+            }
+            $lines[] = $line;
+            break;
+        case 'deleted':
+            $title = "$name hat einen Eintrag gelöscht";
+            $lines[] = entry_summary($entry, $role);
+            break;
+        case 'restored':
+            $title = $count === 1 ? "$name hat einen Eintrag wiederhergestellt" : "$name hat $count Einträge wiederhergestellt";
+            break;
+        case 'deleted-all':
+            $title = "$name hat alle Einträge gelöscht";
+            $lines[] = $count === 1 ? '1 Eintrag' : "$count Einträge";
+            break;
+        case 'imported':
+            $title = "$name hat ein Backup eingespielt";
+            $lines[] = $count === 1 ? '1 Eintrag dazugekommen' : "$count Einträge dazugekommen";
+            break;
+        case 'joined':
+            queue_notification($recipient, "$name ist jetzt dabei", "$name hat sich angemeldet und ein eigenes Passwort festgelegt.");
+            return;
+        default:
+            return;
+    }
+    $lines[] = 'Stand: ' . balance_text($recipient, $name);
+    queue_notification($recipient, $title, implode("\n", $lines));
+}
+
+function queue_notification(array $recipient, string $title, string $message): void
+{
+    $GLOBALS['schulden_outbox'][] = [$recipient, $title, $message];
+}
+
+/** Erst die Antwort an die App schicken, dann die Benachrichtigungen – so wartet niemand darauf. */
+function send_queued_notifications(): void
+{
+    $outbox = $GLOBALS['schulden_outbox'] ?? [];
+    if (!$outbox) {
+        return;
+    }
+    $GLOBALS['schulden_outbox'] = [];
+    if (function_exists('fastcgi_finish_request')) {
+        fastcgi_finish_request();
+    } elseif (function_exists('litespeed_finish_request')) {
+        litespeed_finish_request();
+    }
+    foreach ($outbox as [$recipient, $title, $message]) {
+        $result = ntfy_send($recipient, $title, $message);
+        if ($result !== null) {
+            error_log("[schulden] ntfy an {$recipient['username']}: $result");
+        }
+    }
+}
+
+/** Nachricht über ntfy schicken. Rückgabe: null bei Erfolg, sonst eine Fehlerbeschreibung. */
+function ntfy_send(array $recipient, string $title, string $message): ?string
+{
+    $server = rtrim($recipient['ntfy_server'] !== '' ? $recipient['ntfy_server'] : NTFY_DEFAULT_SERVER, '/');
+    $payload = json_encode([
+        'topic' => $recipient['ntfy_topic'],
+        'title' => $title,
+        'message' => $message,
+        'tags' => ['moneybag'],
+        'click' => app_url(),
+        'icon' => app_url() . 'icons/icon-192.png',
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $headers = ['Content-Type: application/json'];
+    if ($recipient['ntfy_token'] !== '') {
+        $headers[] = 'Authorization: Bearer ' . $recipient['ntfy_token'];
+    }
+
+    if (function_exists('curl_init')) {
+        $ch = curl_init($server . '/');
+        curl_setopt_array($ch, [
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $payload,
+            CURLOPT_HTTPHEADER => $headers,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_CONNECTTIMEOUT => 4,
+            CURLOPT_TIMEOUT => 8,
+        ]);
+        $body = curl_exec($ch);
+        $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        $error = curl_error($ch);
+        unset($ch);
+        if ($body === false) {
+            return "keine Verbindung zu $server ($error)";
+        }
+    } else {
+        $context = stream_context_create(['http' => [
+            'method' => 'POST',
+            'header' => implode("\r\n", $headers),
+            'content' => $payload,
+            'timeout' => 8,
+            'ignore_errors' => true,
+        ]]);
+        $body = @file_get_contents($server . '/', false, $context);
+        $status = isset($http_response_header[0]) && preg_match('/\s(\d{3})\s?/', $http_response_header[0], $m) ? (int) $m[1] : 0;
+        if ($body === false || $status === 0) {
+            return "keine Verbindung zu $server";
+        }
+    }
+    if ($status >= 200 && $status < 300) {
+        return null;
+    }
+    $reason = json_decode((string) $body, true)['error'] ?? '';
+    return "ntfy antwortet mit Fehler $status" . ($reason !== '' ? " ($reason)" : '');
 }

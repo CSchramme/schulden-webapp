@@ -10,6 +10,7 @@ Kleine Web-App, mit der zwei Personen (z. B. ich und Papa) festhalten, wie viel 
 - Verlauf nach Monaten, mit Stand nach jedem Eintrag und dem Anfangsbuchstaben der Person, die eingetragen hat
 - **Angemeldet bleiben:** einmal anmelden, danach ist man ein Jahr lang angemeldet (jede Nutzung verlängert das)
 - **Einmal-Passwort:** Du legst für die andere Person nur ein Startpasswort fest. Beim ersten Anmelden muss sie ein eigenes wählen, das nur sie kennt. Die Zugangsdaten lassen sich direkt aus der App per WhatsApp & Co. verschicken.
+- **Benachrichtigungen über ntfy:** Jede Person bekommt auf ihrem eigenen Kanal eine Push-Nachricht, wenn die andere etwas einträgt, ändert oder löscht – aus eigener Sicht, mit neuem Stand
 - Zum Home-Bildschirm hinzufügen, mit App-Icon, Vollbild und Verknüpfung „Neuer Eintrag“ (langes Drücken auf das Icon, Android)
 - Backup als Datei (JSON), Backup einspielen, Export als Tabelle (CSV für Excel/Numbers)
 - Hell- und Dunkelmodus
@@ -36,6 +37,20 @@ Hat dein Vater schon ein Passwort, das du kennst: unter **Einstellungen → Einm
 - **iPhone/iPad (Safari):** Teilen-Symbol → „Zum Home-Bildschirm“. Danach in der App einmal anmelden – die App auf dem Home-Bildschirm hat einen eigenen Speicher, getrennt von Safari.
 - **Android (Chrome):** Menü ⋮ → „App installieren“, oder in der App auf „Installieren“ tippen.
 
+## Benachrichtigungen (ntfy)
+
+[ntfy](https://ntfy.sh) ist eine kostenlose App für Push-Nachrichten. Jede Person richtet das auf **ihrem eigenen Handy** ein, also du und dein Vater jeweils einmal:
+
+1. App **ntfy** installieren ([Android](https://play.google.com/store/apps/details?id=io.heckel.ntfy), [iPhone](https://apps.apple.com/app/ntfy/id1625396347)).
+2. In der Schulden-App unter **Einstellungen → Benachrichtigungen → Einrichten** den vorgeschlagenen Kanal kopieren und in ntfy über **+** abonnieren.
+3. **Speichern** und **Test-Nachricht senden**.
+
+Danach kommt z. B. bei dir an: „Papa hat etwas eingetragen – Geliehen: 30,00 € · Kino – Stand: Du schuldest Papa 75,90 €“. Ein Tipp auf die Nachricht öffnet die App. Benachrichtigt wird bei neuen, geänderten, gelöschten und wiederhergestellten Einträgen, beim Einspielen eines Backups und wenn die andere Person zum ersten Mal ihr eigenes Passwort festlegt – nie über die eigenen Änderungen.
+
+Der Kanalname ist zufällig, weil bei ntfy.sh jeder mitlesen kann, der den Namen kennt. Wer einen eigenen ntfy-Server betreibt, trägt ihn unter „Eigener ntfy-Server“ ein, bei geschützten Kanälen zusammen mit einem Zugangs-Token. Der Token wird nur an diesen Server geschickt und nie an die App zurückgegeben.
+
+Der Server muss dafür ins Internet dürfen (bei Plesk normalerweise der Fall) und PHP braucht `curl` oder `allow_url_fopen`. Läuft PHP als PHP-FPM (Standard bei Plesk), schickt der Server die Nachricht erst nach der Antwort an die App ab – das Speichern wird dadurch nicht langsamer.
+
 ## Wo werden die Daten gespeichert?
 
 Auf deinem Server, in einer SQLite-Datenbank. Die Datei wird beim ersten Aufruf automatisch angelegt, und zwar **außerhalb** des Web-Ordners, damit sie nie über das Internet abrufbar ist. Die Fotos liegen im Unterordner `belege`:
@@ -59,6 +74,7 @@ Der Ordner liegt im Webspace und wird deshalb normalerweise vom Plesk-Backup erf
 - Nach 8 falschen Passwörtern innerhalb von 15 Minuten ist die Anmeldung für 15 Minuten gesperrt.
 - Ändert jemand sein Passwort, werden seine anderen Geräte abgemeldet.
 - Hochgeladene Fotos werden geprüft (nur JPEG, PNG, WebP, höchstens 8 MB).
+- Ein ntfy-Token wird bei einem Wechsel des ntfy-Servers verworfen, damit er nie an einen anderen Server geht.
 - Gelöschte Einträge werden nur als gelöscht markiert, damit „Rückgängig“ funktioniert.
 
 **Beide Passwörter vergessen?** Den Ordner `schulden-daten` in Plesk umbenennen. Die App startet dann wieder mit „Einrichten“, und danach kannst du ein Backup einspielen.
